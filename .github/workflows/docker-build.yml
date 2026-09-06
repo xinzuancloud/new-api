@@ -53,10 +53,12 @@ jobs:
             IS_FORK=true
           fi
 
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "is_fork=$IS_FORK" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "image=$IMAGE"
+            echo "is_fork=$IS_FORK"
+            echo "sha=$(git rev-parse HEAD)"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
           echo "Resolved $TAG for $IMAGE (fork release: $IS_FORK)"
 
   build_single_arch:
