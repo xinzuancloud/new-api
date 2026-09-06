@@ -251,6 +251,92 @@ func TestDoTaskApiRequest_KeepsReplayableGetBody(t *testing.T) {
 	}
 }
 
+type stubAPIAdaptor struct {
+	Adaptor
+	url string
+}
+
+func (s *stubAPIAdaptor) GetRequestURL(_ *relaycommon.RelayInfo) (string, error) {
+	return s.url, nil
+}
+
+func (s *stubAPIAdaptor) SetupRequestHeader(_ *gin.Context, _ *http.Header, _ *relaycommon.RelayInfo) error {
+	return nil
+}
+
+func TestRelayRequestsCancelUpstreamAndKeepReplayableBody(t *testing.T) {
+	service.InitHttpClient()
+	gin.SetMode(gin.TestMode)
+
+	for _, test := range []struct {
+		name string
+		do   func(Adaptor, *gin.Context, *relaycommon.RelayInfo, io.Reader) (*http.Response, error)
+	}{
+		{name: "API", do: DoApiRequest},
+		{name: "form", do: DoFormRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := []byte("request body")
+			body, closer, err := relaycommon.NewOutboundJSONBody(payload)
+			require.NoError(t, err)
+			defer closer.Close()
+
+			type receivedRequest struct {
+				body          []byte
+				contentLength int64
+				err           error
+			}
+			received := make(chan receivedRequest, 1)
+			upstreamCanceled := make(chan error, 1)
+			release := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data, err := io.ReadAll(r.Body)
+				received <- receivedRequest{body: data, contentLength: r.ContentLength, err: err}
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+					upstreamCanceled <- r.Context().Err()
+				case <-release:
+				}
+			}))
+			defer server.Close()
+			defer close(release)
+
+			requestCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/relay", nil).WithContext(requestCtx)
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+			resp, err := test.do(&stubAPIAdaptor{url: server.URL}, ctx, info, body)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			got := <-received
+			require.NoError(t, got.err)
+			assert.Equal(t, payload, got.body)
+			assert.EqualValues(t, len(payload), got.contentLength)
+			require.NotNil(t, resp.Request.GetBody)
+			replayBody, err := resp.Request.GetBody()
+			require.NoError(t, err)
+			replay, err := io.ReadAll(replayBody)
+			require.NoError(t, err)
+			require.NoError(t, replayBody.Close())
+			assert.Equal(t, payload, replay)
+
+			cancel()
+			require.ErrorIs(t, resp.Request.Context().Err(), context.Canceled)
+			select {
+			case err := <-upstreamCanceled:
+				assert.ErrorIs(t, err, context.Canceled)
+			case <-time.After(5 * time.Second):
+				t.Fatal("upstream request did not observe client cancellation")
+			}
+			_, err = io.ReadAll(resp.Body)
+			assert.ErrorIs(t, err, context.Canceled)
+		})
+	}
+}
+
 type h2ServerResult struct {
 	err           error
 	streamCount   int

@@ -94,6 +94,12 @@ func (s *StreamStatus) IsNormalEnd() bool {
 		s.EndReason == StreamEndReasonHandlerStop
 }
 
+// IsSuccessful distinguishes a completed stream from a partially billed failure.
+// A nil status preserves the behavior of relay formats without stream tracking.
+func (s *StreamStatus) IsSuccessful() bool {
+	return s == nil || (s.IsNormalEnd() && s.EndError == nil && !s.HasErrors())
+}
+
 func (s *StreamStatus) Summary() string {
 	if s == nil {
 		return "StreamStatus<nil>"

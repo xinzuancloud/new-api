@@ -1,14 +1,16 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/dto"
-	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -92,4 +94,20 @@ func newPinRetryContext() *gin.Context {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	return c
+}
+
+func TestShouldRetryStopsWhenClientContextEnds(t *testing.T) {
+	upstreamErr := types.NewOpenAIError(errors.New("upstream"), types.ErrorCodeBadResponseStatusCode, http.StatusTooManyRequests)
+	for _, deadline := range []bool{false, true} {
+		c := newPinRetryContext()
+		ctx, cancel := context.WithCancel(c.Request.Context())
+		if deadline {
+			ctx, cancel = context.WithDeadline(c.Request.Context(), time.Now().Add(-time.Second))
+		} else {
+			cancel()
+		}
+		c.Request = c.Request.WithContext(ctx)
+		assert.False(t, shouldRetry(c, upstreamErr, 3), "ended requests must not consume another upstream attempt")
+		cancel()
+	}
 }

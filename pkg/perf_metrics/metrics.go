@@ -28,6 +28,11 @@ func RecordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens i
 	if info == nil {
 		return
 	}
+	// Settlement can succeed after a stream stops with partial usage. Preserve
+	// those tokens while reporting the actual delivery outcome independently.
+	if info.IsStream && !info.StreamStatus.IsSuccessful() {
+		success = false
+	}
 	now := time.Now()
 	hasTtft := info.IsStream && info.HasSendResponse()
 	ttftMs := int64(0)

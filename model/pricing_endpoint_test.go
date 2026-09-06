@@ -7,9 +7,73 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPricingSerializesEffectiveLegacyCacheRates(t *testing.T) {
+	resetPricingEndpointTestTables(t)
+	savedRead := ratio_setting.CacheRatio2JSONString()
+	savedWrite := ratio_setting.CreateCacheRatio2JSONString()
+	savedPrice := ratio_setting.ModelPrice2JSONString()
+	savedConfig := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		savedConfig[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateCacheRatioByJSONString(savedRead))
+		require.NoError(t, ratio_setting.UpdateCreateCacheRatioByJSONString(savedWrite))
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrice))
+		require.NoError(t, config.GlobalConfig.LoadFromDB(savedConfig))
+		InvalidatePricingCache()
+	})
+	require.NoError(t, ratio_setting.UpdateCacheRatioByJSONString(`{"cache-zero":0,"cache-override":0.2,"cache-mixed":0.1}`))
+	require.NoError(t, ratio_setting.UpdateCreateCacheRatioByJSONString(`{"cache-zero":0,"cache-override":1.5}`))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"cache-per-call":0.01}`))
+	const expression = `tier("base", p * 2 + c * 4 + cr * 0.1)`
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode": `{"cache-expression":"tiered_expr"}`,
+		"billing_setting.billing_expr": `{"cache-expression":"tier(\"base\", p * 2 + c * 4 + cr * 0.1)"}`,
+	}))
+	insertPricingEndpointChannel(t, 920, constant.ChannelTypeOpenAI, dto.ChannelOtherSettings{})
+	cases := []struct {
+		model                     string
+		read, write               any
+		readDefault, writeDefault bool
+	}{
+		{"cache-default", float64(1), 1.25, true, true},
+		{"cache-zero", float64(0), float64(0), false, false},
+		{"cache-override", 0.2, 1.5, false, false},
+		{"cache-mixed", 0.1, 1.25, false, true},
+		{"cache-expression", nil, nil, false, false},
+		{"cache-per-call", nil, nil, false, false},
+	}
+	for _, tc := range cases {
+		insertPricingEndpointAbility(t, 920, tc.model)
+	}
+	InitChannelCache()
+	pricings := pricingByModel(GetPricing())
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			require.Contains(t, pricings, tc.model)
+			encoded, err := common.Marshal(pricings[tc.model])
+			require.NoError(t, err)
+			var payload map[string]any
+			require.NoError(t, common.Unmarshal(encoded, &payload))
+			assert.Equal(t, tc.read, payload["cache_ratio"])
+			assert.Equal(t, tc.write, payload["create_cache_ratio"])
+			assert.Equal(t, tc.readDefault, payload["cache_ratio_defaulted"] == true)
+			assert.Equal(t, tc.writeDefault, payload["create_cache_ratio_defaulted"] == true)
+			if tc.model == "cache-expression" {
+				assert.Equal(t, "tiered_expr", payload["billing_mode"])
+				assert.Equal(t, expression, payload["billing_expr"])
+			}
+		})
+	}
+}
 
 func resetPricingEndpointTestTables(t *testing.T) {
 	t.Helper()

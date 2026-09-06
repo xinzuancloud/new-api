@@ -3,6 +3,7 @@ package helper
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -82,6 +83,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 
 	// 无条件新建 StreamStatus
 	info.StreamStatus = relaycommon.NewStreamStatus()
+	common.SetContextKey(c, constant.ContextKeyStreamStatus, info.StreamStatus)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -283,7 +285,17 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		if err := scanner.Err(); err != nil {
 			if err != io.EOF {
 				logger.LogError(c, "scanner error: "+err.Error())
-				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, err)
+				reason := relaycommon.StreamEndReasonScannerErr
+				if contextErr := c.Request.Context().Err(); contextErr != nil {
+					err = contextErr
+				}
+				switch {
+				case errors.Is(err, context.DeadlineExceeded):
+					reason = relaycommon.StreamEndReasonTimeout
+				case errors.Is(err, context.Canceled):
+					reason = relaycommon.StreamEndReasonClientGone
+				}
+				info.StreamStatus.SetEndReason(reason, err)
 			}
 		}
 		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
@@ -298,7 +310,12 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	case <-c.Request.Context().Done():
 		// 客户端断开：立即 cleanup 关闭上游 resp.Body，解除 scanner 阻塞并让上游停止生成，
 		// 避免为已放弃的请求继续消费上游 token。
-		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
+		err := c.Request.Context().Err()
+		reason := relaycommon.StreamEndReasonClientGone
+		if errors.Is(err, context.DeadlineExceeded) {
+			reason = relaycommon.StreamEndReasonTimeout
+		}
+		info.StreamStatus.SetEndReason(reason, err)
 	}
 
 	cleanup()

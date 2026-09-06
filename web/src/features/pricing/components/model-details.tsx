@@ -86,6 +86,7 @@ import type {
   PricingModel,
   TokenUnit,
 } from '../types'
+import { DefaultRateBadge } from './default-rate-badge'
 import { DynamicPricingBreakdown } from './dynamic-pricing-breakdown'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { ModelDetailsApi } from './model-details-api'
@@ -659,16 +660,19 @@ function PriceSection(props: {
     label: string
     type: PriceType
     available: boolean
+    defaulted?: boolean
   }[] = [
     {
       label: t('Cached input'),
       type: 'cache',
       available: props.model.cache_ratio != null,
+      defaulted: props.model.cache_ratio_defaulted,
     },
     {
       label: t('Cache write'),
       type: 'create_cache',
       available: props.model.create_cache_ratio != null,
+      defaulted: props.model.create_cache_ratio_defaulted,
     },
     {
       label: t('Image input'),
@@ -847,6 +851,7 @@ function PriceSection(props: {
               >
                 <span className='text-muted-foreground/70 text-sm'>
                   {item.label}
+                  <DefaultRateBadge defaulted={item.defaulted} />
                 </span>
                 <span className='text-muted-foreground font-mono text-sm tabular-nums'>
                   {renderPrice(item.type)}

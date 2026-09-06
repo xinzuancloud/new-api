@@ -43,6 +43,7 @@ import {
   stripTrailingZeros,
 } from '../lib/price'
 import type { PricingModel, TokenUnit } from '../types'
+import { DefaultRateBadge } from './default-rate-badge'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 
 // ----------------------------------------------------------------------------
@@ -329,6 +330,7 @@ export function usePricingColumns(
             <span className='font-mono text-sm tabular-nums'>
               {cachedPrice}
             </span>
+            <DefaultRateBadge defaulted={model.cache_ratio_defaulted} />
             <div className='text-muted-foreground/50 text-[10px]'>
               / {tokenUnitLabel}
             </div>

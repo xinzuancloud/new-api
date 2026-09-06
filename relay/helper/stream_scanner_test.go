@@ -283,6 +283,30 @@ func TestStreamScannerHandler_ClientCancelAbortsUpstreamAndReturns(t *testing.T)
 	assert.NotContains(t, body, "second")
 }
 
+func TestStreamScannerHandler_DeadlineIsTimeout(t *testing.T) {
+	for _, source := range []string{"request context", "upstream body"} {
+		t.Run(source, func(t *testing.T) {
+			pr, pw := io.Pipe()
+			defer pr.Close()
+			defer pw.Close()
+			c, resp, info := setupStreamTest(t, pr)
+			resp.Body = pr
+			info.DisablePing = true
+			if source == "request context" {
+				ctx, cancel := context.WithDeadline(context.Background(), time.Unix(0, 0))
+				defer cancel()
+				c.Request = c.Request.WithContext(ctx)
+			} else {
+				require.NoError(t, pw.CloseWithError(context.DeadlineExceeded))
+			}
+			StreamScannerHandler(c, resp, info, func(string, *StreamResult) {})
+			require.NotNil(t, info.StreamStatus)
+			assert.Equal(t, relaycommon.StreamEndReasonTimeout, info.StreamStatus.EndReason)
+			assert.ErrorIs(t, info.StreamStatus.EndError, context.DeadlineExceeded)
+		})
+	}
+}
+
 // ---------- Ping tests ----------
 
 func TestStreamScannerHandler_PingSentDuringSlowUpstream(t *testing.T) {

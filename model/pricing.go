@@ -40,6 +40,9 @@ type Pricing struct {
 	BillingUsageSchema     map[string]jsplugin.UsageFieldSchema `json:"billing_usage_schema,omitempty"`
 	BillingUsageExamples   []jsplugin.UsageExample              `json:"billing_usage_examples,omitempty"`
 	PricingVersion         string                               `json:"pricing_version,omitempty"`
+
+	CacheRatioDefaulted       bool `json:"cache_ratio_defaulted,omitempty"`
+	CreateCacheRatioDefaulted bool `json:"create_cache_ratio_defaulted,omitempty"`
 }
 
 type PricingVendor struct {
@@ -388,12 +391,6 @@ func updatePricing() {
 			pricing.CompletionRatio = ratio_setting.GetCompletionRatio(model)
 			pricing.QuotaType = 0
 		}
-		if cacheRatio, ok := ratio_setting.GetCacheRatio(model); ok {
-			pricing.CacheRatio = &cacheRatio
-		}
-		if createCacheRatio, ok := ratio_setting.GetCreateCacheRatio(model); ok {
-			pricing.CreateCacheRatio = &createCacheRatio
-		}
 		if imageRatio, ok := ratio_setting.GetImageRatio(model); ok {
 			pricing.ImageRatio = &imageRatio
 		}
@@ -417,6 +414,17 @@ func updatePricing() {
 					pricing.BillingExpr = expr
 				}
 			}
+		}
+		// Legacy token billing uses these fallbacks even without configured ratios.
+		// Expressions and per-call prices do not inherit legacy cache pricing.
+		legacyTokenBilling := pricing.QuotaType == 0 && pricing.BillingMode != billing_setting.BillingModeTieredExpr
+		if cacheRatio, ok := ratio_setting.GetCacheRatio(model); ok || legacyTokenBilling {
+			pricing.CacheRatio = &cacheRatio
+			pricing.CacheRatioDefaulted = !ok
+		}
+		if createCacheRatio, ok := ratio_setting.GetCreateCacheRatio(model); ok || legacyTokenBilling {
+			pricing.CreateCacheRatio = &createCacheRatio
+			pricing.CreateCacheRatioDefaulted = !ok
 		}
 		plugin, ok := pluginGeneration.GetByModel(model)
 		if !ok {

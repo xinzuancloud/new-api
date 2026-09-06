@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -72,6 +73,27 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
+	policy := operation_setting.GetRoutingPolicy()
+	usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+	_, policyConfigured := policy.GroupTagOrder[usingGroup]
+	if usingGroup == "auto" {
+		for _, group := range service.GetRequestAutoGroups(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup)) {
+			if _, ok := policy.GroupTagOrder[group]; ok {
+				policyConfigured = true
+				break
+			}
+		}
+	}
+	if policy.Enabled && policyConfigured && relayFormat != types.RelayFormatOpenAIRealtime {
+		originalRequest := c.Request
+		ctx, cancel := context.WithTimeout(originalRequest.Context(), time.Duration(policy.RequestTimeoutSeconds)*time.Second)
+		defer func() {
+			cancel()
+			// Middleware still evaluates the actual client context after this handler.
+			c.Request = originalRequest
+		}()
+		c.Request = originalRequest.WithContext(ctx)
+	}
 	requestId := c.GetString(common.RequestIdKey)
 	//group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 	//originalModel := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
@@ -194,6 +216,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.LastError = nil
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+		if err := c.Request.Context().Err(); err != nil {
+			newAPIError = types.NewErrorWithStatusCode(err, types.ErrorCodeDoRequestFailed, http.StatusGatewayTimeout, types.ErrOptionWithSkipRetry())
+			break
+		}
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
@@ -230,6 +256,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = relayHandler(c, relayInfo)
 		}
 
+		if newAPIError != nil && errors.Is(c.Request.Context().Err(), context.DeadlineExceeded) {
+			newAPIError = types.NewErrorWithStatusCode(context.DeadlineExceeded, types.ErrorCodeDoRequestFailed, http.StatusGatewayTimeout, types.ErrOptionWithSkipRetry())
+		}
 		if newAPIError == nil {
 			relayInfo.LastError = nil
 			return
@@ -350,7 +379,7 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 	if channel == nil {
-		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		return nil, types.NewErrorWithStatusCode(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
 	}
 
 	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
@@ -363,6 +392,9 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 }
 
 func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {
+	if c.Request != nil && c.Request.Context().Err() != nil {
+		return false
+	}
 	if openaiErr == nil {
 		return false
 	}
@@ -395,6 +427,12 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 }
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
+	if c.Request != nil && c.Request.Context().Err() != nil {
+		return
+	}
+	if relayInfo != nil {
+		service.RecordRoutingFailure(c, channelError.ChannelId, relayInfo.OriginModelName, err.StatusCode, err.Error())
+	}
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously

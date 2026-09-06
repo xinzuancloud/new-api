@@ -1,0 +1,15 @@
+{
+  "kimi-k3": 0.1,
+  "k3": 0.1,
+  "kimi-k2.6": 0.16842105263157894,
+  "kimi-for-coding": 0.2,
+  "deepseek-v4-flash": 0.03181818181818182,
+  "deepseek-v4-pro": 0.03333333333333333,
+  "glm-5.3": 0.18571428571428572,
+  "glm-5.2": 0.18571428571428572,
+  "glm-5.3-flash": 0.2,
+  "doubao-seed-2.0-lite": 0.2,
+  "doubao-seed-2.1-turbo": 0.2,
+  "doubao-seed-evolving": 0.2,
+  "minimax-m3": 0.2
+}

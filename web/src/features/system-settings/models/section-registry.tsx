@@ -24,6 +24,7 @@ import { ClaudeSettingsCard } from './claude-settings-card'
 import { GeminiSettingsCard } from './gemini-settings-card'
 import { GlobalSettingsCard } from './global-settings-card'
 import { GrokSettingsCard } from './grok-settings-card'
+import { RoutingPolicySection } from './routing-policy-section'
 import { RoutingReliabilitySection } from './routing-reliability-section'
 
 function formatJsonForEditor(value: string, fallback: string) {
@@ -63,6 +64,13 @@ const MODELS_SECTIONS = [
           },
         }}
       />
+    ),
+  },
+  {
+    id: 'routing-policy',
+    titleKey: 'Routing Policy',
+    build: (settings: ModelSettings) => (
+      <RoutingPolicySection defaultValue={settings.RoutingPolicy} />
     ),
   },
   {
