@@ -55,9 +55,9 @@ jobs:
           else
             mapfile -t release_tags < <(
               gh api --paginate "repos/${UPSTREAM_REPOSITORY}/releases?per_page=100" \
-                --jq '.[] | select(.draft == false) | .tag_name' \
-                | awk '/^v/ { print }' \
-                | sort -V
+                --jq '.[] | select(.draft == false and (.tag_name | startswith("v"))) | [(.published_at // .created_at), .tag_name] | @tsv' \
+                | sort -k1,1 -k2,2 \
+                | cut -f2-
             )
           fi
 
@@ -81,8 +81,9 @@ jobs:
             fi
 
             existing_fork_tag=''
-            if git ls-remote --refs origin "refs/tags/${upstream_tag}-fork.*" | read -r fork_ref fork_sha; then
-              existing_fork_tag="${fork_ref#refs/tags/}"
+            existing_fork_ref="$(git ls-remote --refs origin "refs/tags/${upstream_tag}-fork.*" | awk 'NR == 1 { print $1 }')"
+            if [[ -n "$existing_fork_ref" ]]; then
+              existing_fork_tag="${existing_fork_ref#refs/tags/}"
             fi
 
             if [[ "$upstream_tag_exists" == true && -n "$existing_fork_tag" ]]; then
