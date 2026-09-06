@@ -12,7 +12,7 @@ Do not change this to merge `upstream/main`. The synchronization source is alway
 
 `.github/workflows/sync-upstream-release.yml` runs every six hours and can also be started with `workflow_dispatch`.
 
-For each upstream release tag that is not already present in the fork, it:
+On a scheduled run, it considers only the newest non-draft upstream release. This prevents the first run from replaying the entire upstream release history. A manual run may provide one exact `tag` for recovery or an intentional historical build. For the selected tag, it:
 
 1. Fetches the exact upstream tag into a namespaced local ref.
 2. Merges that tag into fork `main` with `git merge --no-ff --no-edit`, keeping fork commits.

@@ -31,8 +31,8 @@ For main-branch pushes, CI runs backend/frontend checks and a non-publishing Doc
 ## Workflow data flow
 
 1. `sync-upstream-release.yml` runs on a schedule and through `workflow_dispatch`.
-2. It lists upstream non-draft releases, sorts their tags oldest-to-newest, and skips tags already present in the fork.
-3. For each unprocessed tag, it fetches the exact upstream tag into a namespaced local ref, merges it into fork `main` with `--no-ff`, and aborts on conflicts.
+2. On scheduled runs it selects only the newest non-draft upstream release; manual runs may select one exact tag. It skips the selected tag when both its upstream and fork tags already exist.
+3. It fetches the exact selected upstream tag into a namespaced local ref, merges it into fork `main` with `--no-ff`, and aborts on conflicts.
 4. It pushes the updated `main`, mirrors the exact upstream tag, creates the deterministic fork tag, and dispatches the release workflows explicitly. Explicit dispatch is required because pushes made with `GITHUB_TOKEN` do not recursively trigger ordinary `push` workflows.
 5. `ci.yml` validates pushes to `main`; the Docker validation job builds without pushing.
 6. `release.yml`, `docker-build.yml`, and `electron-build.yml` accept a tag input and build from the exact requested tag. They publish to the fork's GitHub Release and GHCR namespace, never to the upstream Docker Hub image.

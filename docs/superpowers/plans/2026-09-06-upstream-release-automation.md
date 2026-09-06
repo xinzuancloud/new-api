@@ -61,7 +61,7 @@ Use a six-hour cron plus `workflow_dispatch`. Grant `contents: write` and `actio
 
 - [ ] **Step 2: Discover unprocessed releases**
 
-Use `gh api --paginate "repos/${UPSTREAM_REPOSITORY}/releases?per_page=100"` and `--jq` to select `.draft == false` and tags beginning with `v`, sort by published/created timestamp, and skip tags found by `git ls-remote origin refs/tags/<tag>`.
+Use `gh api --paginate "repos/${UPSTREAM_REPOSITORY}/releases?per_page=100"` and `--jq` to select `.draft == false` and tags beginning with `v`, sort by published/created timestamp, and select only the newest tag. A manual `tag` input may override this with one exact tag; never loop through the entire release history on a scheduled run.
 
 - [ ] **Step 3: Merge without overwriting fork code**
 

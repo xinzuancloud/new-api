@@ -53,12 +53,14 @@ jobs:
           if [[ -n "$REQUESTED_TAG" ]]; then
             release_tags=("$REQUESTED_TAG")
           else
-            mapfile -t release_tags < <(
+            latest_tag="$(
               gh api --paginate "repos/${UPSTREAM_REPOSITORY}/releases?per_page=100" \
                 --jq '.[] | select(.draft == false and (.tag_name | startswith("v"))) | [(.published_at // .created_at), .tag_name] | @tsv' \
                 | sort -k1,1 -k2,2 \
+                | tail -n 1 \
                 | cut -f2-
-            )
+            )"
+            release_tags=("$latest_tag")
           fi
 
           if [[ "${#release_tags[@]}" -eq 0 ]]; then
