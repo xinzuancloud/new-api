@@ -2,16 +2,22 @@ name: Release (Linux, macOS, Windows)
 permissions:
   contents: write
 
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
 on:
   workflow_dispatch:
     inputs:
+      tag:
+        description: 'Release tag to build (for example v1.0.0 or v1.0.0-rc.1-fork.20260906.gabc1234)'
+        required: true
+        type: string
       name:
         description: 'reason'
         required: false
   push:
     tags:
-      - '*'
-      - '!*-alpha*'
+      - 'v*'
 
 jobs:
   linux:
@@ -22,14 +28,9 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
       - name: Determine Version
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/}
-          else
-            VERSION=$(git describe --tags --match 'v[0-9]*')
-          fi
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        run: echo "VERSION=$RELEASE_TAG" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: '1.4.0'
@@ -59,8 +60,10 @@ jobs:
 
       - name: Release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
-        if: startsWith(github.ref, 'refs/tags/')
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           files: |
             new-api-*
             checksums-linux.txt
@@ -75,14 +78,9 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
       - name: Determine Version
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/}
-          else
-            VERSION=$(git describe --tags --match 'v[0-9]*')
-          fi
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        run: echo "VERSION=$RELEASE_TAG" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: '1.4.0'
@@ -108,8 +106,10 @@ jobs:
 
       - name: Release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
-        if: startsWith(github.ref, 'refs/tags/')
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           files: |
             new-api-macos-*
             checksums-macos.txt
@@ -127,14 +127,9 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
       - name: Determine Version
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/}
-          else
-            VERSION=$(git describe --tags --match 'v[0-9]*')
-          fi
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        run: echo "VERSION=$RELEASE_TAG" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: '1.4.0'
@@ -159,8 +154,10 @@ jobs:
 
       - name: Release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
-        if: startsWith(github.ref, 'refs/tags/')
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           files: |
             new-api-*.exe
             checksums-windows.txt
