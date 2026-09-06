@@ -35,17 +35,25 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: true
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
 
       - name: Merge missing upstream releases
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+          SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
           REQUESTED_TAG: ${{ inputs.tag }}
           FORK_REPOSITORY: ${{ github.repository }}
         run: |
           set -Eeuo pipefail
 
+          if [[ -z "$SYNC_TOKEN" ]]; then
+            echo '::error::Repository secret UPSTREAM_SYNC_TOKEN is required. It must have Contents, Actions, and Workflows write permissions.'
+            exit 1
+          fi
+
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote set-url origin "https://x-access-token:${SYNC_TOKEN}@github.com/${FORK_REPOSITORY}.git"
           git remote add upstream "$UPSTREAM_REMOTE" 2>/dev/null || git remote set-url upstream "$UPSTREAM_REMOTE"
           git fetch --no-tags origin main
           git merge --ff-only origin/main

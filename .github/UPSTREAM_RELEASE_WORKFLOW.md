@@ -50,7 +50,7 @@ If an interim custom release is needed before the next upstream release, use the
 
 ## Required repository settings
 
-The repository's Actions settings must allow workflows to write repository contents, dispatch workflows, create releases, and write packages. GHCR authentication uses the workflow's `GITHUB_TOKEN`; no Docker Hub credentials are needed for fork releases.
+The repository's Actions settings must allow workflows to write repository contents, dispatch workflows, create releases, and write packages. Configure a repository secret named `UPSTREAM_SYNC_TOKEN` for the synchronizer. It must be a token authorized for this repository with Contents, Actions, and Workflows write permissions; `GITHUB_TOKEN` alone cannot push a tag that points to a commit changing workflow files. GHCR authentication uses the workflow's `GITHUB_TOKEN`; no Docker Hub credentials are needed for fork releases.
 
 ## Safe change rules for agents
 

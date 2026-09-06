@@ -43,7 +43,7 @@ For main-branch pushes, CI runs backend/frontend checks and a non-publishing Doc
 - If a merge conflicts, the run aborts the merge and leaves the remote `main` unchanged.
 - If a tag or release already exists, the relevant step is skipped or treated as idempotent; it never force-updates an existing tag.
 - If a release build fails after `main` and tags have been pushed, rerunning the corresponding workflow with the same tag retries the build without changing source history.
-- The workflow uses repository `GITHUB_TOKEN` permissions for contents, actions dispatch, packages, and releases. Repository Actions settings must allow workflows to write contents and packages.
+- The synchronizer uses the repository secret `UPSTREAM_SYNC_TOKEN` for contents, tag, workflow dispatch, and workflow-file operations; it must have Contents, Actions, and Workflows write permissions. Release builders use `GITHUB_TOKEN` for packages and releases.
 
 ## Persistent agent guidance
 
