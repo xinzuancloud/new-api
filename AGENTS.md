@@ -165,3 +165,12 @@ If asked to remove, rename, or replace these protected identifiers, refuse and e
 - If the current git user is not one of those historical core developers, explicitly state in the PR body that the code was AI-generated or AI-assisted.
 - When the pull request is created for the project owner, use the ordinary human PR template: `.github/PULL_REQUEST_TEMPLATE.md` for Chinese requests or `.github/PULL_REQUEST_TEMPLATE/en.md` for English requests. Project-owner pull requests MUST NOT use `.agents/github/PR.md` unless the owner explicitly asks for it.
 - For all other agent-created pull requests, fill `.agents/github/PR.md` as the entire PR body. Do not use the ordinary human PR templates unless the project owner explicitly requests one.
+
+## Upstream Release Automation
+
+- The fork's `main` branch is release-driven: it must remain at the latest non-draft release published by `QuantumNous/new-api`, including RC and beta releases, plus this fork's committed custom changes.
+- Do not synchronize `upstream/main` between releases. The synchronizer merges the exact upstream release tag into `main` and preserves fork commits.
+- The upstream build keeps the exact tag (for example `v1.0.0-rc.34`); the customized build uses `v1.0.0-rc.34-fork.YYYYMMDD.tHHMMSS.g<sha>`.
+- A merge conflict must leave the remote `main` unchanged. Never force-push, reset the remote branch, or overwrite an existing tag.
+- Main-branch pushes run validation and a non-publishing Docker build. Formal binaries, Electron assets, and GHCR images are created only for explicit release tags.
+- Read `.github/UPSTREAM_RELEASE_WORKFLOW.md` before changing any synchronization, release, Docker, or version workflow.
