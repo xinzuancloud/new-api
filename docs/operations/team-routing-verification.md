@@ -20,8 +20,8 @@ Routing tests initialize actual database state, then exercise memory-cache on/of
 | Engine | Version | Command | Result |
 |---|---|---|---|
 | SQLite through project Go driver | 3.50.4 | `go test ./service -run TestRoutingPolicy -count=1` | Passed |
-| PostgreSQL | 15.19 | `NEW_API_ROUTING_TEST_DSN='<local disposable PostgreSQL DSN>' go test ./service -run TestRoutingPolicy -count=1` | Passed |
-| MySQL | 8.0.46 | `NEW_API_ROUTING_TEST_DSN='<local disposable MySQL DSN>' go test ./service -run TestRoutingPolicy -count=1` | Passed |
+| PostgreSQL | 15.19 | `NEW_API_ROUTING_TEST_DSN='postgres://postgres:local-routing-test@127.0.0.1:25432/routing_test?sslmode=disable' go test ./service -run TestRoutingPolicy -count=1` | Passed |
+| MySQL | 8.0.46 | `NEW_API_ROUTING_TEST_DSN='root:local-routing-test@tcp(127.0.0.1:23306)/routing_test?charset=utf8mb4&parseTime=True&loc=Local' go test ./service -run TestRoutingPolicy -count=1` | Passed |
 
 Test fixture uses rollback transactions and has no production credentials. Exact local endpoint ports: PostgreSQL 25432, MySQL 23306 on loopback. Test-only credentials were synthetic. No minimum-version-specific feature was introduced.
 
@@ -63,3 +63,7 @@ Automatic review rejected extra full-DB/.env duplication and a production test l
 - Earlier three-minute window included four 502 responses during single-instance cutover; exclude this transition when assessing steady-state behavior.
 - Operations scripts and documentation installed; hourly quiet-unless-actionable Codex heartbeat `new-api` created in this task.
 - CTYun enabled only as the final step at 14:44:38 UTC+8, VIP-only; final-step snapshot `/opt/ops-backups/team-routing/20260906_144438/settings-before.json`. No paid generation probe was made.
+
+Final read-only check after cache synchronization: CTYun status=1, its 12 enabled model abilities belong only to VIP; k3 maps to kimi-k3. The latest five-minute window contained 35 K3 consumption records; all 35 explicitly recorded cache_ratio=0.1 and none had a stream-error marker. All four production containers were healthy/running. Local disposable MySQL/PostgreSQL test containers were removed after verification.
+
+Minor UI follow-up: effective default cache prices are marked in table/detail views; the compact card view shows the effective numeric rate without the extra default badge. This does not change charges.
