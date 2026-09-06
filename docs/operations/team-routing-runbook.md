@@ -39,7 +39,7 @@ Plus 的 Kimi 订阅白名单是 `kimi-for-coding`、`kimi-k3-256k`。Plus 火�
 2. 运行 Go 完整测试、relaykit独立构建、前端检查及真实 SQLite/MySQL/PostgreSQL 路由矩阵，完整应用只连接模拟上游验证分组和回退。
 3. 生产端禁止复制凭据。自动审批曾拒绝额外复制完整数据库/.env及在生产PG创建测试角色；改用本机独立环境。原每日备份保留，本次无schema/driver/migration改动。
 4. `python3 ops/team-routing-configure.py --database new-api` 预览；`--apply` 保存仅含渠道元数据与相关设置的600权限快照后事务更新，默认保持天翼关闭。并发管理员修改会导致事务中止。
-5. 使用独立 `docker-compose.team-routing.yml` 镜像覆盖文件启动已验证版本，不修改原 `.env`。原镜像保留。单实例切换可能短暂中断，不宣称零停机。
+5. 使用独立 `docker-compose.override.yml` 镜像覆盖文件启动已验证版本，不修改原 `.env`。原镜像保留。单实例切换可能短暂中断，不宣称零停机。
 6. 核对版本、健康、UI、白名单、价格、真实被动流量和监测工具，最后才执行 `--apply --enable-metered`。
 7. 回滚程序：用原 Compose 文件重建原官方应用（不要加载自定义覆盖文件）。需要恢复配置时只恢复本次快照中变动的字段和选项；不要恢复整库覆盖新消费记录/用户余额。紧急情况下先关闭天翼。
 
