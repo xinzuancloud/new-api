@@ -1,20 +1,67 @@
-name: Publish Docker image (Multi-arch)
+name: Publish Docker image (GHCR)
 
 on:
   push:
     tags:
-      - '*'
-      - '!nightly*'
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag name to build (e.g., v0.10.8-alpha.3)'
+        description: 'Tag name to build (for example v1.0.0 or v1.0.0-fork.20260906.t143000.gabc1234)'
         required: true
         type: string
 
 jobs:
+  prepare:
+    name: Prepare Docker tags
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.version.outputs.image }}
+      is_fork: ${{ steps.version.outputs.is_fork }}
+      sha: ${{ steps.version.outputs.sha }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Check out requested tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - name: Resolve Docker tags
+        id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+
+          TAG="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          if [[ ! "$TAG" =~ ^v[0-9] ]]; then
+            echo "::error::Tag '$TAG' is not a version tag"
+            exit 1
+          fi
+          if ! git rev-parse "refs/tags/$TAG^{commit}" >/dev/null 2>&1; then
+            echo "::error::Tag '$TAG' does not exist in the checked-out repository"
+            exit 1
+          fi
+
+          IMAGE="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          IS_FORK=false
+          if [[ "$TAG" == *-fork.* ]]; then
+            IS_FORK=true
+          fi
+
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "is_fork=$IS_FORK" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved $TAG for $IMAGE (fork release: $IS_FORK)"
+
   build_single_arch:
     name: Build & push (${{ matrix.arch }})
+    needs: [prepare]
     strategy:
       fail-fast: false
       matrix:
@@ -26,63 +73,44 @@ jobs:
             platform: linux/arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    outputs:
-      tag: ${{ steps.version.outputs.tag }}
-
     permissions:
-      packages: write
       contents: read
+      packages: write
       id-token: write
-
     steps:
-      - name: Check out
+      - name: Check out requested tag
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 0 || 1 }}
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 1
+          ref: ${{ needs.prepare.outputs.sha }}
 
-      - name: Resolve tag & write VERSION
-        id: version
-        run: |
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            TAG="${{ github.event.inputs.tag }}"
-            if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
-              echo "::error::Tag '$TAG' does not exist"
-              exit 1
-            fi
-          else
-            TAG=${GITHUB_REF#refs/tags/}
-          fi
-          echo "TAG=${TAG}" >> $GITHUB_ENV
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "${TAG}" > VERSION
-          echo "Building tag: ${TAG} for ${{ matrix.arch }}"
+      - name: Write VERSION
+        run: echo "${{ needs.prepare.outputs.tag }}" > VERSION
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@c99871dec2022cc055c062a10cc1a1310835ceb4 # v4.3.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata (labels)
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: calciumion/new-api
+          images: ${{ needs.prepare.outputs.image }}
 
-      - name: Build & push
+      - name: Build & push single-architecture image
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           platforms: ${{ matrix.platform }}
           push: true
-          tags: |
-            calciumion/new-api:${{ env.TAG }}-${{ matrix.arch }}
-            calciumion/new-api:latest-${{ matrix.arch }}
+          tags: ${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.tag }}-${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -92,61 +120,74 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      - name: Sign image with cosign
-        run: cosign sign --yes calciumion/new-api@${{ steps.build.outputs.digest }}
+      - name: Sign architecture image
+        run: cosign sign --yes "${{ needs.prepare.outputs.image }}@${{ steps.build.outputs.digest }}"
 
-      - name: Image summary
+      - name: Output digest
         run: |
-          echo "### Docker Image Digest (${{ matrix.arch }})" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "calciumion/new-api:${TAG}-${{ matrix.arch }}" >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### Docker Image Digest (${{ matrix.arch }})"
+            echo '```'
+            echo "${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.tag }}-${{ matrix.arch }}"
+            echo "${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   create_manifests:
-    name: Create multi-arch manifests
-    needs: [build_single_arch]
+    name: Create multi-architecture manifests
+    needs: [prepare, build_single_arch]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-
     permissions:
+      packages: write
       id-token: write
-
     steps:
-      - name: Set version
-        run: echo "TAG=${{ needs.build_single_arch.outputs.tag }}" >> $GITHUB_ENV
-
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@c99871dec2022cc055c062a10cc1a1310835ceb4 # v4.3.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create & push manifest (version)
+      - name: Create version manifest
         run: |
+          set -Eeuo pipefail
+          IMAGE="${{ needs.prepare.outputs.image }}"
+          TAG="${{ needs.prepare.outputs.tag }}"
           docker buildx imagetools create \
-            -t calciumion/new-api:${TAG} \
-            calciumion/new-api:${TAG}-amd64 \
-            calciumion/new-api:${TAG}-arm64
+            -t "$IMAGE:$TAG" \
+            "$IMAGE:$TAG-amd64" \
+            "$IMAGE:$TAG-arm64"
 
-      - name: Create & push manifest (latest)
+      - name: Create fork latest manifest
+        if: needs.prepare.outputs.is_fork == 'true'
         run: |
+          set -Eeuo pipefail
+          IMAGE="${{ needs.prepare.outputs.image }}"
+          TAG="${{ needs.prepare.outputs.tag }}"
           docker buildx imagetools create \
-            -t calciumion/new-api:latest \
-            calciumion/new-api:latest-amd64 \
-            calciumion/new-api:latest-arm64
+            -t "$IMAGE:latest" \
+            "$IMAGE:$TAG-amd64" \
+            "$IMAGE:$TAG-arm64"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e70d6ae9567deba6 # v4.1.2
 
-      - name: Sign manifests with cosign
-        run: |
-          cosign sign --yes calciumion/new-api:${TAG}
-          cosign sign --yes calciumion/new-api:latest
+      - name: Sign version manifest
+        run: cosign sign --yes "${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.tag }}"
+
+      - name: Sign fork latest manifest
+        if: needs.prepare.outputs.is_fork == 'true'
+        run: cosign sign --yes "${{ needs.prepare.outputs.image }}:latest"
 
       - name: Manifest summary
         run: |
-          echo "### Multi-arch Manifest" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          docker buildx imagetools inspect calciumion/new-api:${TAG} >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          {
+            echo '### Multi-architecture Manifest'
+            echo '```'
+            docker buildx imagetools inspect "${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.tag }}"
+            if [[ "${{ needs.prepare.outputs.is_fork }}" == true ]]; then
+              echo '---'
+              docker buildx imagetools inspect "${{ needs.prepare.outputs.image }}:latest"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
