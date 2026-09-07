@@ -69,3 +69,5 @@ The architecture images were pushed successfully, but the manifest job reference
 Validation: `python3 -m unittest discover -s .github/tests -v` exercises the synchronizer with isolated command fixtures, including fail-closed legacy-workflow checks, fresh tags, manual recovery, and scheduled no-op behavior. Run `actionlint` on the changed workflow files before publishing.
 
 Dedicated binary publishers resolve the checked-out Go module with `go list -m` and inject the explicit requested tag into `<module>/common.Version`. Native binaries are checked with `VERSION` removed from the environment, so an environment override cannot hide an incorrect linker target. Electron uses the explicit tag as well, rather than choosing another tag at the same commit with `git describe`.
+
+Electron explicitly downloads the `windows-build` artifact into `windows-build/`. Both artifact upload and Release publication fail when no installer matches, preventing a successful run with an empty Release upload.
