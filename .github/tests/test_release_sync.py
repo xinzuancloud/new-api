@@ -15,9 +15,13 @@ args=sys.argv[1:]
 with open(os.environ['CALLS'],'a') as f:f.write(json.dumps([name]+args)+'\n')
 if name=='gh':
  if args[:2]==['workflow','disable']:
-  if os.getenv('FAIL_DISABLE')=='1':sys.exit(1)
+  marker=pathlib.Path('disabled-'+args[2])
+  if os.getenv('FAIL_DISABLE')=='1' or os.getenv('ALREADY_DISABLED')=='1' or marker.exists():sys.exit(1)
+  marker.touch()
  elif args and args[0]=='api':
-  if '/actions/workflows/' in args[1]:print('active' if os.getenv('BAD_STATE')=='1' else 'disabled_manually')
+  if '/actions/workflows/' in args[1]:
+   disabled=os.getenv('ALREADY_DISABLED')=='1' or pathlib.Path('disabled-'+args[1].rsplit('/',1)[1]).exists()
+   print('disabled_manually' if disabled and os.getenv('BAD_STATE')!='1' else 'active')
   else:print('2026-09-07T00:00:00Z\tv1.2.3')
  elif args[:2]!=['workflow','run']:raise SystemExit('Unexpected gh call')
 elif name=='git':
@@ -78,6 +82,12 @@ class ReleaseSyncTest(unittest.TestCase):
         self.assertEqual({c[3] for c in dispatches},{'fork-release.yml','fork-docker-build.yml','fork-electron-build.yml'})
         self.assertEqual(len({tuple(c) for c in dispatches}),6)
         self.assertTrue(all('--force' not in c for c in calls))
+
+    def test_already_disabled_publishers_allow_recovery_without_disable_request(self):
+        result,calls=self.run_sync(EXISTING='1',ALREADY_DISABLED='1')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertFalse(any(c[:3]==['gh','workflow','disable'] for c in calls))
+        self.assertEqual(len([c for c in calls if c[:3]==['gh','workflow','run']]),6)
 
     def test_manual_recovery_uses_existing_tag_names_without_rewriting_tags(self):
         result,calls=self.run_sync(EXISTING='1')

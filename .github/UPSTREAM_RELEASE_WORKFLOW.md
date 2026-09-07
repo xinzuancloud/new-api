@@ -14,7 +14,7 @@ Do not change this to merge `upstream/main`. The synchronization source is alway
 
 On a scheduled run, it considers only the newest non-draft upstream release. This prevents the first run from replaying the entire upstream release history. A manual run may provide one exact `tag` for recovery or an intentional historical build. For the selected tag, it:
 
-1. Disables and verifies the legacy publisher workflow IDs (`release.yml`, `docker-build.yml`, `electron-build.yml`), then fetches the exact upstream tag into a namespaced local ref.
+1. Checks the legacy publisher state, disables only IDs not already manually disabled, and verifies the legacy publisher workflow IDs (`release.yml`, `docker-build.yml`, `electron-build.yml`), then fetches the exact upstream tag into a namespaced local ref.
 2. Merges that tag into fork `main` with `git merge --no-ff --no-edit`, keeping fork commits.
 3. Stops and aborts the merge if there is a conflict. It does not push a partial branch or publish a partial release.
 4. Pushes the updated `main` and mirrors the exact upstream tag without changing it.
