@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Optional upstream release tag to process; blank processes all missing releases'
+        description: 'Optional upstream release tag to process; blank processes the newest published release'
         required: false
         type: string
 
@@ -51,6 +51,18 @@ jobs:
             exit 1
           fi
 
+          # Original upstream tags retain their own publishing YAML. Disable
+          # those workflow IDs permanently before any push, then publish only
+          # through the fork-owned dispatch workflows on main.
+          for workflow in release.yml docker-build.yml electron-build.yml; do
+            gh workflow disable "$workflow" --repo "$FORK_REPOSITORY"
+            state="$(gh api "repos/${FORK_REPOSITORY}/actions/workflows/${workflow}" --jq '.state')"
+            if [[ "$state" != disabled_manually ]]; then
+              echo "::error::Legacy publisher $workflow is not disabled; refusing to push release refs"
+              exit 1
+            fi
+          done
+
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote set-url origin "https://x-access-token:${SYNC_TOKEN}@github.com/${FORK_REPOSITORY}.git"
@@ -76,7 +88,6 @@ jobs:
             exit 0
           fi
 
-          main_updated=false
           processed=0
 
           for upstream_tag in "${release_tags[@]}"; do
@@ -91,12 +102,12 @@ jobs:
             fi
 
             existing_fork_tag=''
-            existing_fork_ref="$(git ls-remote --refs origin "refs/tags/${upstream_tag}-fork.*" | awk 'NR == 1 { print $1 }')"
+            existing_fork_ref="$(git ls-remote --refs origin "refs/tags/${upstream_tag}-fork.*" | awk 'NR == 1 { print $2 }')"
             if [[ -n "$existing_fork_ref" ]]; then
               existing_fork_tag="${existing_fork_ref#refs/tags/}"
             fi
 
-            if [[ "$upstream_tag_exists" == true && -n "$existing_fork_tag" ]]; then
+            if [[ "$upstream_tag_exists" == true && -n "$existing_fork_tag" && -z "$REQUESTED_TAG" ]]; then
               echo "Already synchronized: $upstream_tag -> $existing_fork_tag"
               continue
             fi
@@ -120,7 +131,6 @@ jobs:
             remote_main_sha="$(git ls-remote origin refs/heads/main | awk '{ print $1 }')"
             if [[ "$remote_main_sha" != "$main_sha" ]]; then
               git push origin 'HEAD:main'
-              main_updated=true
             fi
 
             if [[ "$upstream_tag_exists" == false ]]; then
@@ -139,16 +149,12 @@ jobs:
               fi
             fi
 
-            for workflow in release.yml docker-build.yml electron-build.yml; do
+            for workflow in fork-release.yml fork-docker-build.yml fork-electron-build.yml; do
               gh workflow run "$workflow" --repo "$FORK_REPOSITORY" --ref main --field "tag=$upstream_tag"
               gh workflow run "$workflow" --repo "$FORK_REPOSITORY" --ref main --field "tag=$existing_fork_tag"
             done
 
             processed=$((processed + 1))
           done
-
-          if [[ "$main_updated" == true ]]; then
-            gh workflow run ci.yml --repo "$FORK_REPOSITORY" --ref main
-          fi
 
           echo "Processed $processed upstream release(s)."

@@ -14,14 +14,16 @@ Do not change this to merge `upstream/main`. The synchronization source is alway
 
 On a scheduled run, it considers only the newest non-draft upstream release. This prevents the first run from replaying the entire upstream release history. A manual run may provide one exact `tag` for recovery or an intentional historical build. For the selected tag, it:
 
-1. Fetches the exact upstream tag into a namespaced local ref.
+1. Disables and verifies the legacy publisher workflow IDs (`release.yml`, `docker-build.yml`, `electron-build.yml`), then fetches the exact upstream tag into a namespaced local ref.
 2. Merges that tag into fork `main` with `git merge --no-ff --no-edit`, keeping fork commits.
 3. Stops and aborts the merge if there is a conflict. It does not push a partial branch or publish a partial release.
 4. Pushes the updated `main` and mirrors the exact upstream tag without changing it.
 5. Creates a fork tag from the updated `main` commit.
-6. Explicitly dispatches the binary, Docker, and Electron release workflows for both tags.
+6. Explicitly dispatches `fork-release.yml`, `fork-docker-build.yml`, and `fork-electron-build.yml` from `main`, once for each tag.
 
-The explicit dispatch is intentional: a push made with the repository `GITHUB_TOKEN` does not recursively start ordinary `push` workflows.
+The dedicated publishers accept only `workflow_dispatch` and check out the explicit tag. `UPSTREAM_SYNC_TOKEN` pushes do trigger tag workflows, so the legacy workflow IDs must remain disabled at repository level: immutable upstream tags still contain their original publishing definitions, including Docker Hub targets and prerelease exclusions. Never re-enable those IDs for a retry. This prevents duplicate uploads while keeping the exact upstream tag unchanged. The new run titles include the target tag; GitHub may still show `main` as the workflow source.
+
+A scheduled run skips an already synchronized pair of tags. An explicit manual tag reuses the existing refs and dispatches publication again, without rewriting tags. Each dedicated publisher serializes retries for the same tag with `cancel-in-progress: false`. Main pushes from the PAT already trigger `ci.yml`; the synchronizer does not dispatch a duplicate CI run.
 
 ## Version mapping
 
@@ -38,7 +40,7 @@ The fork suffix includes the source commit timestamp and short SHA. A retry for 
 
 Pushing additional custom commits to `main` does not create a formal release. `ci.yml` runs backend/frontend validation and a Docker build with `push: false`. This catches build regressions without filling the Releases page with one release per commit.
 
-If an interim custom release is needed before the next upstream release, use the manual tag input in the release workflows and use the same `-fork.<timestamp>.g<sha>` naming convention.
+If an interim custom release is needed before the next upstream release, use the manual tag input in the dedicated `fork-*` release workflows and use the same `-fork.<timestamp>.g<sha>` naming convention.
 
 ## Artifacts
 
@@ -59,3 +61,11 @@ The repository's Actions settings must allow workflows to write repository conte
 - Do not point fork workflows at the official `calciumion/new-api` image.
 - Keep RC and beta tags included in `v*` release filters.
 - If a workflow's behavior changes, update this file and the corresponding section in `AGENTS.md` in the same change.
+
+## Recovery of the rc.34 publication failure
+
+The architecture images were pushed successfully, but the manifest job referenced a malformed cosign-installer commit. The correct v4.1.2 pin is `6f9f17788090df1f26f669e9d70d6ae9567deba6`. Use the dedicated Docker workflow with the existing tag to rebuild/reconcile its manifests and signatures. Do not move or overwrite the Git tag. Legacy upstream Docker Hub jobs and duplicate asset uploads are avoided by keeping the old publishing workflows disabled.
+
+Validation: `python3 -m unittest discover -s .github/tests -v` exercises the synchronizer with isolated command fixtures, including fail-closed legacy-workflow checks, fresh tags, manual recovery, and scheduled no-op behavior. Run `actionlint` on the changed workflow files before publishing.
+
+Dedicated binary publishers resolve the checked-out Go module with `go list -m` and inject the explicit requested tag into `<module>/common.Version`. Native binaries are checked with `VERSION` removed from the environment, so an environment override cannot hide an incorrect linker target. Electron uses the explicit tag as well, rather than choosing another tag at the same commit with `git describe`.

@@ -1,15 +1,18 @@
-name: Publish Docker image (GHCR)
+name: Publish GHCR images (tag)
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
         description: 'Tag name to build (for example v1.0.0 or v1.0.0-fork.20260906.t143000.gabc1234)'
         required: true
         type: string
+
+run-name: Publish GHCR images (tag) · ${{ inputs.tag }}
+
+concurrency:
+  group: fork-docker-build-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   prepare:
@@ -27,7 +30,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: refs/tags/${{ inputs.tag }}
 
       - name: Resolve Docker tags
         id: version
