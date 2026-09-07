@@ -27,6 +27,7 @@ import { SettingsPageProvider } from '../../components/settings-page-context'
 import {
   createRoutingPolicyFormSchema,
   parseRoutingPolicy,
+  routingPolicyFormDefaults,
   serializeRoutingPolicy,
 } from '../lib/routing-policy'
 import { RoutingPolicySection } from '../routing-policy-section'
@@ -55,6 +56,7 @@ const defaults = {
   enabled: false,
   group_tag_order: {},
   max_attempts_per_tag: 3,
+  max_total_attempts: 0,
   rate_limit_cooldown_seconds: 60,
   quota_cooldown_seconds: 3600,
   quota_error_keywords: [],
@@ -66,6 +68,63 @@ describe('routing policy settings', () => {
     expect(parseRoutingPolicy('')).toEqual(defaults)
     expect(parseRoutingPolicy('{}')).toEqual(defaults)
     expect(() => parseRoutingPolicy('{')).toThrow()
+  })
+
+  test.each([
+    { max_attempts_per_tag: 0, max_total_attempts: 32 },
+    { max_attempts_per_tag: 3, max_total_attempts: 0 },
+    { max_attempts_per_tag: 256, max_total_attempts: 1024 },
+  ])('loading and saving attempt modes preserves %j', (attempts) => {
+    const stored = JSON.stringify({ ...defaults, ...attempts })
+    const values = createRoutingPolicyFormSchema((key) => key).parse(
+      routingPolicyFormDefaults(stored)
+    )
+    expect(JSON.parse(serializeRoutingPolicy(values))).toEqual({
+      ...defaults,
+      ...attempts,
+    })
+  })
+
+  test('legacy policy without a total attempt limit inherits retry settings', () => {
+    const values = routingPolicyFormDefaults('{"max_attempts_per_tag":3}')
+    expect(values.max_attempts_per_tag).toBe(3)
+    expect(values.max_total_attempts).toBe(0)
+  })
+
+  test('all-channel mode and a separate request limit save together with stopping behavior explained', async () => {
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    renderPolicy()
+    const attempts = screen.getByRole('spinbutton', {
+      name: 'Attempts per tag (0 = all available)',
+    })
+    const total = screen.getByRole('spinbutton', {
+      name: 'Total attempts per request',
+    })
+    expect(attempts).toHaveAttribute('max', '256')
+    expect(total).toHaveAttribute('max', '1024')
+    expect(total).toHaveValue(0)
+    expect(total).toHaveAccessibleDescription(
+      /Zero uses Retry Times plus the initial attempt/
+    )
+    expect(
+      screen.getByText(
+        'When trying all channels, reaching the total attempt limit or timeout ends the request; it does not skip to another supplier.'
+      )
+    ).toBeVisible()
+    fireEvent.change(attempts, { target: { value: '0' } })
+    fireEvent.change(total, { target: { value: '32' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+    await waitFor(() => expect(put).toHaveBeenCalledOnce())
+    expect(put).toHaveBeenCalledWith('/api/option/', {
+      key: 'RoutingPolicy',
+      value: JSON.stringify({
+        ...defaults,
+        max_attempts_per_tag: 0,
+        max_total_attempts: 32,
+      }),
+    })
   })
 
   test('saving rows preserves tag priority and explicit zero cooldowns in one policy', () => {
@@ -87,8 +146,11 @@ describe('routing policy settings', () => {
   })
 
   test.each([
-    { max_attempts_per_tag: 0 },
-    { max_attempts_per_tag: 11 },
+    { max_attempts_per_tag: -1 },
+    { max_attempts_per_tag: 257 },
+    { max_total_attempts: -1 },
+    { max_total_attempts: 1025 },
+    { max_total_attempts: 1.5 },
     { request_timeout_seconds: 0 },
     { request_timeout_seconds: 1801 },
     { rate_limit_cooldown_seconds: -1 },
@@ -148,12 +210,15 @@ describe('routing policy settings', () => {
     })
   })
 
-  test('empty numeric input displays validation and never saves as zero', async () => {
+  test.each([
+    'Attempts per tag (0 = all available)',
+    'Total attempts per request',
+  ])('empty %s displays validation and never saves as zero', async (name) => {
     const put = vi
       .spyOn(api, 'put')
       .mockResolvedValue({ data: { success: true } })
     renderPolicy()
-    const input = screen.getByRole('spinbutton', { name: 'Attempts per tag' })
+    const input = screen.getByRole('spinbutton', { name })
     fireEvent.change(input, { target: { value: '' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
     await waitFor(() => expect(input).toHaveAttribute('aria-invalid', 'true'))
@@ -167,13 +232,17 @@ describe('routing policy settings', () => {
       .mockResolvedValueOnce({ data: { success: true } })
     renderPolicy()
     fireEvent.change(
-      screen.getByRole('spinbutton', { name: 'Attempts per tag' }),
+      screen.getByRole('spinbutton', {
+        name: 'Attempts per tag (0 = all available)',
+      }),
       { target: { value: '2' } }
     )
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
     await screen.findByRole('alert')
     expect(
-      screen.getByRole('spinbutton', { name: 'Attempts per tag' })
+      screen.getByRole('spinbutton', {
+        name: 'Attempts per tag (0 = all available)',
+      })
     ).toHaveValue(2)
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))

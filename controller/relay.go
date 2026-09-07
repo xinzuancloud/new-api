@@ -215,7 +215,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+	totalAttemptLimit := service.RoutingAttemptLimit(c)
+	retryLimit := common.RetryTimes
+	if totalAttemptLimit > 0 {
+		retryLimit = totalAttemptLimit - 1
+	}
+	for ; retryParam.GetRetry() <= retryLimit && (totalAttemptLimit == 0 || len(c.GetStringSlice("use_channel")) < totalAttemptLimit); retryParam.IncreaseRetry() {
 		if err := c.Request.Context().Err(); err != nil {
 			newAPIError = types.NewErrorWithStatusCode(err, types.ErrorCodeDoRequestFailed, http.StatusGatewayTimeout, types.ErrOptionWithSkipRetry())
 			break
@@ -269,7 +274,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
 
-		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+		remainingRetries := retryLimit - retryParam.GetRetry()
+		if totalAttemptLimit > 0 {
+			remainingRetries = totalAttemptLimit - len(c.GetStringSlice("use_channel"))
+		}
+		if !shouldRetry(c, newAPIError, remainingRetries) {
 			break
 		}
 	}
@@ -656,7 +665,15 @@ func executeTaskSubmissionWith(
 		Retry:       common.GetPointer(0),
 	}
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+	totalAttemptLimit := service.RoutingAttemptLimit(c)
+	if relayInfo.LockedChannel != nil {
+		totalAttemptLimit = 0
+	}
+	retryLimit := common.RetryTimes
+	if totalAttemptLimit > 0 {
+		retryLimit = totalAttemptLimit - 1
+	}
+	for ; retryParam.GetRetry() <= retryLimit && (totalAttemptLimit == 0 || len(c.GetStringSlice("use_channel")) < totalAttemptLimit); retryParam.IncreaseRetry() {
 		stage = "select_channel"
 		if requestErr := c.Request.Context().Err(); requestErr != nil {
 			diagnostics.cancelled("before_attempt", retryParam.GetRetry()+1)
@@ -717,7 +734,11 @@ func executeTaskSubmissionWith(
 				relayInfo)
 		}
 
-		willRetry := shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry())
+		remainingRetries := retryLimit - retryParam.GetRetry()
+		if totalAttemptLimit > 0 {
+			remainingRetries = totalAttemptLimit - len(c.GetStringSlice("use_channel"))
+		}
+		willRetry := shouldRetryTaskRelay(c, channel.Id, taskErr, remainingRetries)
 		diagnostics.attemptFailed(retryParam.GetRetry()+1, channel, taskErr, willRetry)
 		if !willRetry {
 			break

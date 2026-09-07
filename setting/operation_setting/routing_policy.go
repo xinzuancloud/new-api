@@ -15,6 +15,7 @@ const RoutingPolicyOptionKey = "RoutingPolicy"
 type RoutingPolicy struct {
 	Enabled                  bool                `json:"enabled"`
 	GroupTagOrder            map[string][]string `json:"group_tag_order"`
+	MaxTotalAttempts         int                 `json:"max_total_attempts,omitempty"`
 	MaxAttemptsPerTag        int                 `json:"max_attempts_per_tag"`
 	RateLimitCooldownSeconds int                 `json:"rate_limit_cooldown_seconds"`
 	QuotaCooldownSeconds     int                 `json:"quota_cooldown_seconds"`
@@ -43,8 +44,11 @@ func ParseRoutingPolicy(value string) (*RoutingPolicy, error) {
 	if err := common.UnmarshalJsonStr(value, &policy); err != nil {
 		return nil, err
 	}
-	if policy.MaxAttemptsPerTag < 1 || policy.MaxAttemptsPerTag > 10 {
-		return nil, fmt.Errorf("attempts per tag must be between 1 and 10")
+	if policy.MaxAttemptsPerTag < 0 || policy.MaxAttemptsPerTag > 256 {
+		return nil, fmt.Errorf("attempts per tag must be between 0 and 256 (0 tries all available channels)")
+	}
+	if policy.MaxTotalAttempts < 0 || policy.MaxTotalAttempts > 1024 {
+		return nil, fmt.Errorf("total attempts must be between 0 and 1024 (0 inherits the global retry limit)")
 	}
 	if policy.RateLimitCooldownSeconds < 0 || policy.RateLimitCooldownSeconds > 3600 {
 		return nil, fmt.Errorf("rate limit cooldown must be between 0 and 3600 seconds")

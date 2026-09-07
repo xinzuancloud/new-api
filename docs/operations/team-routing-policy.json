@@ -1,18 +1,37 @@
 {
   "enabled": true,
   "group_tag_order": {
-    "default": ["sensenova"],
-    "plus": ["sensenova", "volcengine", "kimi"],
-    "dev": ["sensenova", "volcengine", "kimi"],
-    "vip": ["kimi", "volcengine", "sensenova", "ctyun"]
+    "default": [
+      "sensenova"
+    ],
+    "plus": [
+      "sensenova",
+      "volcengine",
+      "kimi"
+    ],
+    "dev": [
+      "sensenova",
+      "volcengine",
+      "kimi"
+    ],
+    "vip": [
+      "kimi",
+      "volcengine",
+      "sensenova",
+      "ctyun"
+    ]
   },
-  "max_attempts_per_tag": 3,
+  "max_attempts_per_tag": 0,
   "rate_limit_cooldown_seconds": 60,
   "quota_cooldown_seconds": 3600,
   "quota_error_keywords": [
-    "weekly", "5-hour usage quota", "token plan entitlement exhausted",
-    "Allocated quota exceeded", "You exceeded your current quota",
+    "weekly",
+    "5-hour usage quota",
+    "token plan entitlement exhausted",
+    "Allocated quota exceeded",
+    "You exceeded your current quota",
     "Your credit balance is too low"
   ],
-  "request_timeout_seconds": 300
+  "request_timeout_seconds": 300,
+  "max_total_attempts": 32
 }

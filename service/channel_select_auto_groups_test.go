@@ -267,8 +267,9 @@ func TestRoutingPolicyRejectsInvalidConfiguration(t *testing.T) {
 	original := operation_setting.RoutingPolicyJSON()
 	t.Cleanup(func() { require.NoError(t, operation_setting.UpdateRoutingPolicy(original)) })
 	for _, mutation := range []func(map[string]any){
-		func(p map[string]any) { p["max_attempts_per_tag"] = 0 },
+		func(p map[string]any) { p["max_attempts_per_tag"] = -1 },
 		func(p map[string]any) { p["quota_cooldown_seconds"] = -1 },
+		func(p map[string]any) { p["max_total_attempts"] = 1025 },
 		func(p map[string]any) { p["request_timeout_seconds"] = 1801 },
 		func(p map[string]any) { p["group_tag_order"] = map[string][]string{"team": {"free", "free"}} },
 	} {
@@ -280,4 +281,185 @@ func TestRoutingPolicyRejectsInvalidConfiguration(t *testing.T) {
 		require.Error(t, operation_setting.UpdateRoutingPolicy(string(raw)))
 		assert.Equal(t, original, operation_setting.RoutingPolicyJSON(), "invalid update must not change active policy")
 	}
+}
+
+func TestRoutingPolicyExhaustsProviderAccountsBeforeFallback(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	original := operation_setting.RoutingPolicyJSON()
+	t.Cleanup(func() { require.NoError(t, operation_setting.UpdateRoutingPolicy(original)); routingCooldowns.Clear() })
+	const policy = `{"enabled":true,"group_tag_order":{"team":["free","plan"]},"max_attempts_per_tag":0,"max_total_attempts":32,"rate_limit_cooldown_seconds":60,"quota_cooldown_seconds":3600,"quota_error_keywords":[],"request_timeout_seconds":300}`
+	require.NoError(t, operation_setting.UpdateRoutingPolicy(policy))
+	common.RetryTimes = 7
+	for id := 4101; id <= 4112; id++ {
+		createChannelSelectAutoGroupsChannel(t, db, id, "team", "m")
+		require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", id).Update("tag", "free").Error)
+	}
+	createChannelSelectAutoGroupsChannel(t, db, 4201, "team", "m")
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", 4201).Update("tag", "plan").Error)
+	for _, cache := range []bool{true, false} {
+		for _, skipUnavailable := range []bool{false, true} {
+			t.Run(fmt.Sprintf("cache=%v/unavailable=%v", cache, skipUnavailable), func(t *testing.T) {
+				routingCooldowns.Clear()
+				common.MemoryCacheEnabled = cache
+				require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", 4101).Update("status", common.ChannelStatusEnabled).Error)
+				require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ?", 4101).Update("enabled", true).Error)
+				expected := 12
+				if skipUnavailable {
+					require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", 4101).Update("status", common.ChannelStatusAutoDisabled).Error)
+					require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ?", 4101).Update("enabled", false).Error)
+					routingCooldowns.Store(routingCooldownKey{4102, "m"}, time.Now().Add(time.Hour))
+					expected = 10
+				}
+				model.InitChannelCache()
+				ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+				ctx.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+				common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "team")
+				p := &RetryParam{Ctx: ctx, TokenGroup: "team", ModelName: "m"}
+				used := []string{}
+				for attempt := 0; attempt < expected; attempt++ {
+					p.SetRetry(attempt)
+					ch, _, err := CacheGetRandomSatisfiedChannel(p)
+					require.NoError(t, err)
+					require.NotNil(t, ch)
+					assert.Equal(t, "free", *ch.Tag, "provider must not be skipped at the old three/eight-attempt limits")
+					id := fmt.Sprint(ch.Id)
+					assert.NotContains(t, used, id)
+					if skipUnavailable {
+						assert.NotContains(t, []int{4101, 4102}, ch.Id)
+					}
+					used = append(used, id)
+					ctx.Set("use_channel", used)
+				}
+				p.SetRetry(expected)
+				ch, _, err := CacheGetRandomSatisfiedChannel(p)
+				require.NoError(t, err)
+				require.NotNil(t, ch)
+				assert.Equal(t, 4201, ch.Id)
+			})
+		}
+	}
+}
+
+func TestRoutingPolicyTotalBudgetDoesNotCauseEarlyFallback(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	original := operation_setting.RoutingPolicyJSON()
+	t.Cleanup(func() { require.NoError(t, operation_setting.UpdateRoutingPolicy(original)); routingCooldowns.Clear() })
+	require.NoError(t, operation_setting.UpdateRoutingPolicy(`{"enabled":true,"group_tag_order":{"team":["free","plan"]},"max_attempts_per_tag":0,"max_total_attempts":2,"rate_limit_cooldown_seconds":0,"quota_cooldown_seconds":0,"quota_error_keywords":[],"request_timeout_seconds":300}`))
+	common.RetryTimes = 7
+	for _, fixture := range []struct {
+		id  int
+		tag string
+	}{{4301, "free"}, {4302, "free"}, {4303, "free"}, {4401, "plan"}} {
+		createChannelSelectAutoGroupsChannel(t, db, fixture.id, "team", "m")
+		require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", fixture.id).Update("tag", fixture.tag).Error)
+	}
+	model.InitChannelCache()
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "team")
+	ctx.Set("use_channel", []string{"4301"})
+	p := &RetryParam{Ctx: ctx, TokenGroup: "team", ModelName: "m", Retry: common.GetPointer(1)}
+	ch, _, err := CacheGetRandomSatisfiedChannel(p)
+	require.NoError(t, err)
+	require.NotNil(t, ch)
+	assert.Equal(t, "free", *ch.Tag)
+	ctx.Set("use_channel", []string{"4301", fmt.Sprint(ch.Id)})
+	p.SetRetry(0) // Auto-group retry counters can reset; total attempts cannot.
+	ch, _, err = CacheGetRandomSatisfiedChannel(p)
+	require.NoError(t, err)
+	assert.Nil(t, ch, "budget exhaustion must stop without trying plan")
+}
+
+func TestRoutingAttemptLimitAppliesOnlyToConfiguredRequests(t *testing.T) {
+	setupChannelSelectAutoGroupsTest(t)
+	original := operation_setting.RoutingPolicyJSON()
+	t.Cleanup(func() { require.NoError(t, operation_setting.UpdateRoutingPolicy(original)) })
+	require.NoError(t, operation_setting.UpdateRoutingPolicy(`{"enabled":true,"group_tag_order":{"vip":["free","plan"]},"max_attempts_per_tag":0,"max_total_attempts":32,"rate_limit_cooldown_seconds":0,"quota_cooldown_seconds":0,"quota_error_keywords":[],"request_timeout_seconds":300}`))
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+	common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "default")
+	assert.Zero(t, RoutingAttemptLimit(ctx), "unconfigured groups keep native retries")
+	common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "vip")
+	assert.Equal(t, 32, RoutingAttemptLimit(ctx))
+	common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "auto")
+	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"vip"})
+	assert.Equal(t, 32, RoutingAttemptLimit(ctx), "auto routing includes the configured candidate group")
+	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"default"})
+	assert.Zero(t, RoutingAttemptLimit(ctx))
+	assert.Zero(t, RoutingAttemptLimit(nil))
+}
+
+func TestRoutingPolicyExhaustsAutoGroupBeforeAdvancing(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	original := operation_setting.RoutingPolicyJSON()
+	t.Cleanup(func() { require.NoError(t, operation_setting.UpdateRoutingPolicy(original)); routingCooldowns.Clear() })
+	require.NoError(t, operation_setting.UpdateRoutingPolicy(`{"enabled":true,"group_tag_order":{"vip":["free"],"default":["free"]},"max_attempts_per_tag":0,"max_total_attempts":32,"rate_limit_cooldown_seconds":0,"quota_cooldown_seconds":0,"quota_error_keywords":[],"request_timeout_seconds":300}`))
+	common.RetryTimes = 7
+	for id := 4501; id <= 4512; id++ {
+		createChannelSelectAutoGroupsChannel(t, db, id, "vip", "m")
+		require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", id).Update("tag", "free").Error)
+	}
+	createChannelSelectAutoGroupsChannel(t, db, 4601, "default", "m")
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", 4601).Update("tag", "free").Error)
+	model.InitChannelCache()
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+	common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "auto")
+	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"vip", "default"})
+	common.SetContextKey(ctx, constant.ContextKeyTokenCrossGroupRetry, true)
+	p := &RetryParam{Ctx: ctx, TokenGroup: "auto", ModelName: "m"}
+	used := []string{}
+	for i := 0; i < 12; i++ {
+		ch, group, err := CacheGetRandomSatisfiedChannel(p)
+		require.NoError(t, err)
+		require.NotNil(t, ch)
+		require.Equal(t, "vip", group, "legacy retry limit must not advance an unexhausted policy group")
+		id := fmt.Sprint(ch.Id)
+		assert.NotContains(t, used, id)
+		used = append(used, id)
+		ctx.Set("use_channel", used)
+		p.IncreaseRetry()
+	}
+	ch, group, err := CacheGetRandomSatisfiedChannel(p)
+	require.NoError(t, err)
+	require.NotNil(t, ch)
+	assert.Equal(t, "default", group)
+	assert.Equal(t, 4601, ch.Id)
+}
+
+func TestRoutingPolicyKeepsLegacyFiniteAutoGroupRetry(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	original := operation_setting.RoutingPolicyJSON()
+	t.Cleanup(func() { require.NoError(t, operation_setting.UpdateRoutingPolicy(original)); routingCooldowns.Clear() })
+	require.NoError(t, operation_setting.UpdateRoutingPolicy(`{"enabled":true,"group_tag_order":{"vip":["free"],"default":["free"]},"max_attempts_per_tag":3,"rate_limit_cooldown_seconds":0,"quota_cooldown_seconds":0,"quota_error_keywords":[],"request_timeout_seconds":300}`))
+	common.RetryTimes = 1
+	for _, fixture := range []struct {
+		id    int
+		group string
+	}{{4701, "vip"}, {4702, "vip"}, {4703, "vip"}, {4801, "default"}} {
+		createChannelSelectAutoGroupsChannel(t, db, fixture.id, fixture.group, "m")
+		require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", fixture.id).Update("tag", "free").Error)
+	}
+	model.InitChannelCache()
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+	common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "auto")
+	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"vip", "default"})
+	common.SetContextKey(ctx, constant.ContextKeyTokenCrossGroupRetry, true)
+	p := &RetryParam{Ctx: ctx, TokenGroup: "auto", ModelName: "m"}
+	used := []string{}
+	groups := []string{}
+	for p.GetRetry() <= common.RetryTimes && len(groups) < 3 {
+		ch, group, err := CacheGetRandomSatisfiedChannel(p)
+		require.NoError(t, err)
+		require.NotNil(t, ch)
+		groups = append(groups, group)
+		used = append(used, fmt.Sprint(ch.Id))
+		ctx.Set("use_channel", used)
+		p.IncreaseRetry()
+	}
+	assert.Equal(t, []string{"vip", "vip", "default"}, groups)
+	assert.Zero(t, RoutingAttemptLimit(ctx), "old saved policies retain native cross-group retry behavior")
 }

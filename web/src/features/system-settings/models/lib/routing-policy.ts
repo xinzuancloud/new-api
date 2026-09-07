@@ -23,7 +23,8 @@ const routingPolicySchema = z.object({
   group_tag_order: z
     .record(z.string().trim().min(1), z.array(z.string().trim().min(1)).min(1))
     .default({}),
-  max_attempts_per_tag: z.number().int().min(1).max(10).default(3),
+  max_attempts_per_tag: z.number().int().min(0).max(256).default(3),
+  max_total_attempts: z.number().int().min(0).max(1024).default(0),
   rate_limit_cooldown_seconds: z.number().int().min(0).max(3600).default(60),
   quota_cooldown_seconds: z.number().int().min(0).max(604800).default(3600),
   quota_error_keywords: z.array(z.string()).default([]),
@@ -77,8 +78,13 @@ export function createRoutingPolicyFormSchema(t: (key: string) => string) {
     max_attempts_per_tag: z
       .number({ error: numberMessage })
       .int(numberMessage)
-      .min(1, numberMessage)
-      .max(10, numberMessage),
+      .min(0, numberMessage)
+      .max(256, numberMessage),
+    max_total_attempts: z
+      .number({ error: numberMessage })
+      .int(numberMessage)
+      .min(0, numberMessage)
+      .max(1024, numberMessage),
     rate_limit_cooldown_seconds: z
       .number({ error: numberMessage })
       .int(numberMessage)
@@ -113,6 +119,7 @@ export function routingPolicyFormDefaults(
       tags: tags.join('\n'),
     })),
     max_attempts_per_tag: policy.max_attempts_per_tag,
+    max_total_attempts: policy.max_total_attempts,
     rate_limit_cooldown_seconds: policy.rate_limit_cooldown_seconds,
     quota_cooldown_seconds: policy.quota_cooldown_seconds,
     quota_error_keywords: policy.quota_error_keywords.join('\n'),
@@ -135,6 +142,7 @@ export function serializeRoutingPolicy(
       ])
     ),
     max_attempts_per_tag: values.max_attempts_per_tag,
+    max_total_attempts: values.max_total_attempts,
     rate_limit_cooldown_seconds: values.rate_limit_cooldown_seconds,
     quota_cooldown_seconds: values.quota_cooldown_seconds,
     quota_error_keywords: values.quota_error_keywords

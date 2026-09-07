@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
@@ -125,7 +126,7 @@ func SelectPolicyChannel(param *RetryParam, group string) (*model.Channel, bool,
 		if rank < lastTier {
 			continue
 		}
-		if attempts[tag] >= policy.MaxAttemptsPerTag {
+		if policy.MaxAttemptsPerTag > 0 && attempts[tag] >= policy.MaxAttemptsPerTag {
 			continue
 		}
 		tagFilters := append(append([]dto.ChannelFilter{}, filters...), dto.ChannelFilter{Kind: dto.FilterChannelTag, ChannelTag: tag})
@@ -144,12 +145,15 @@ func SelectPolicyChannel(param *RetryParam, group string) (*model.Channel, bool,
 		return nil, true, nil
 	}
 	remaining := common.RetryTimes - param.GetRetry() + 1
+	if policy.MaxTotalAttempts > 0 {
+		remaining = policy.MaxTotalAttempts - len(param.Ctx.GetStringSlice("use_channel"))
+	}
 	if remaining <= 0 {
 		return nil, true, nil
 	}
 	// After trying a tier, reserve one attempt per remaining provider. This keeps
 	// a large free account pool from consuming the entire metered-fallback budget.
-	for len(candidates) > 1 && candidates[0].Tag != nil && attempts[*candidates[0].Tag] > 0 && remaining < len(candidates) {
+	for policy.MaxAttemptsPerTag > 0 && len(candidates) > 1 && candidates[0].Tag != nil && attempts[*candidates[0].Tag] > 0 && remaining < len(candidates) {
 		candidates = candidates[1:]
 	}
 	return candidates[0], true, nil
@@ -184,4 +188,26 @@ func routingModelName(channelID int, name string) string {
 		return mapped
 	}
 	return name
+}
+
+// RoutingAttemptLimit is an absolute request budget, including the initial
+// attempt. Zero preserves legacy retry behavior for unconfigured requests.
+func RoutingAttemptLimit(c *gin.Context) int {
+	policy := operation_setting.GetRoutingPolicy()
+	if c == nil || !policy.Enabled || policy.MaxTotalAttempts == 0 {
+		return 0
+	}
+	group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+	if group == "auto" {
+		for _, candidate := range GetRequestAutoGroups(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup)) {
+			if _, ok := policy.GroupTagOrder[candidate]; ok {
+				return policy.MaxTotalAttempts
+			}
+		}
+		return 0
+	}
+	if _, ok := policy.GroupTagOrder[group]; ok {
+		return policy.MaxTotalAttempts
+	}
+	return 0
 }

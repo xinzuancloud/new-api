@@ -92,9 +92,21 @@ export function RoutingPolicySection(props: { defaultValue: string }) {
   const numericFields = [
     {
       name: 'max_attempts_per_tag',
-      label: t('Attempts per tag'),
-      min: 1,
-      max: 10,
+      label: t('Attempts per tag (0 = all available)'),
+      min: 0,
+      max: 256,
+      description: t(
+        'Zero tries every currently available, untried channel with the current tag before fallback. A positive value limits attempts for each tag.'
+      ),
+    },
+    {
+      name: 'max_total_attempts',
+      label: t('Total attempts per request'),
+      min: 0,
+      max: 1024,
+      description: t(
+        'Includes the initial attempt and all retries across tags. Zero uses Retry Times plus the initial attempt.'
+      ),
     },
     {
       name: 'rate_limit_cooldown_seconds',
@@ -154,7 +166,7 @@ export function RoutingPolicySection(props: { defaultValue: string }) {
             </FieldDescription>
             <FieldDescription>
               {t(
-                'Tags are tried from top to bottom. Channel affinity only applies within the highest healthy tier. Attempts remain limited by the existing retry budget.'
+                'Tags are tried from top to bottom. Channel affinity only applies within the highest healthy tier.'
               )}
             </FieldDescription>
             <FieldSet>
@@ -243,7 +255,8 @@ export function RoutingPolicySection(props: { defaultValue: string }) {
                     {t('Allowed range: {{min}}–{{max}}', {
                       min: field.min,
                       max: field.max,
-                    })}
+                    })}{' '}
+                    {'description' in field && field.description}
                   </FieldDescription>
                   <FieldError
                     id={`routing-${field.name}-error`}
@@ -255,6 +268,11 @@ export function RoutingPolicySection(props: { defaultValue: string }) {
             <FieldDescription>
               {t(
                 'Cooldowns temporarily skip a channel for the requested model. Zero disables that cooldown. Channels become eligible after expiry without an automatic recovery test.'
+              )}
+            </FieldDescription>
+            <FieldDescription>
+              {t(
+                'When trying all channels, reaching the total attempt limit or timeout ends the request; it does not skip to another supplier.'
               )}
             </FieldDescription>
             <FieldDescription>
