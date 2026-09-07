@@ -1,4 +1,6 @@
-# Team routing verification — 2026-09-06
+# Team routing verification
+
+Current runtime: `v1.0.0-rc.33-fork.20260907.t100757.g3f015753`; latest change is documented in the 2026-09-07 section below. The initial 2026-09-06 evidence is retained for comparison.
 
 Code commit: `2c40be03`. Custom version: `v1.0.0-rc.33-fork.20260906.t143023.g2c40be03`.
 
@@ -67,3 +69,18 @@ Automatic review rejected extra full-DB/.env duplication and a production test l
 Final read-only check after cache synchronization: CTYun status=1, its 12 enabled model abilities belong only to VIP; k3 maps to kimi-k3. The latest five-minute window contained 35 K3 consumption records; all 35 explicitly recorded cache_ratio=0.1 and none had a stream-error marker. All four production containers were healthy/running. Local disposable MySQL/PostgreSQL test containers were removed after verification.
 
 Minor UI follow-up: effective default cache prices are marked in table/detail views; the compact card view shows the effective numeric rate without the extra default badge. This does not change charges.
+
+## 2026-09-07 Exhaustive provider traversal
+
+User approved trying all currently eligible provider accounts before fallback, superseding the original three-account cap. Code commit `3f015753`, version `v1.0.0-rc.33-fork.20260907.t100757.g3f015753`. No new documentation files were added.
+
+- Per-tag limit0 means all eligible untried channels; positive limits1–256 remain available for backward compatibility.
+- Independent max_total_attempts32 covers the current longest17-channel route. Config value0 inherits native RetryTimes. Exhaustion or the unchanged300s deadline ends the request; all-mode never reserves budget by skipping remaining supplier accounts.
+- Auto group counter resets cannot bypass the absolute request limit. Exhaustive mode stays in the current group until its eligible candidates are exhausted; saved finite policies using native retry budgets retain their old cross-group behavior.
+- Root `GOWORK=off go test ./...`, focused regressions, changed-package vet and `cd relaykit && GOWORK=off go build ./...` passed.
+- Real SQLite3.50.4, PostgreSQL15.19, MySQL8.0.46 routing tests passed with cache on/off using the same commands above and `-run 'TestRoutingPolicy|TestRoutingAttemptLimit'`. Tests cover12 eligible accounts,10 when one is disabled and one cooling, no early fallback at budget exhaustion, and Auto behavior.
+- UI typecheck/lint/format and27 focused routing tests passed; all6 new strings translated in7 locales through the prescribed script.
+- Complete application with local simulated providers passed17 scenarios. Plus/DeepSeek tried12 distinct SenseNova accounts before Volcengine on attempt13. VIP/K3 tried3 Kimi,1 Volcengine,12 SenseNova, then metered on attempt17. No real model probes or production credential copies were used.
+- Artifact evidence: `/private/tmp/newapi-team-routing-build/exhaustive-validation.json`; detailed root test output `/private/tmp/newapi-team-routing-build/exhaustive-go-tests.log`.
+
+Deployment completed 2026-09-07 around10:15 UTC+8. A temporary same-application instance received traffic while the primary was replaced; Caddy was restored to `new-api:3000` and the temporary container removed. Only RoutingPolicy attempt fields changed; hashes of ModelRatio/CompletionRatio/CacheRatio/GroupRatio remained identical. CTYun remained enabled and VIP-only. Rollback snapshot: `/opt/ops-backups/exhaustive-routing-20260907_101524`. No production model probes were made.
