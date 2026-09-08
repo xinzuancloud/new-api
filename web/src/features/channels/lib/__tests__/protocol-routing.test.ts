@@ -101,7 +101,7 @@ describe('protocol routing channel configuration', () => {
     ).toBe(false)
   })
 
-  test('rejects incomplete model overrides instead of merging defaults', () => {
+  test('accepts partial model differences over inline defaults', () => {
     expect(
       channelFormSchema.safeParse({
         ...form,
@@ -111,7 +111,7 @@ describe('protocol routing channel configuration', () => {
           'mapped-model': { loss_policy: 'strict' },
         }),
       }).success
-    ).toBe(false)
+    ).toBe(true)
   })
 })
 
@@ -244,4 +244,55 @@ test('accepts and preserves explicitly advertised native Claude context editing'
   expect(
     JSON.parse(buildSettingJSON(values)).protocol_routing.defaults
   ).toEqual(nativePolicy)
+})
+
+test('profile inheritance preserves empty local policies and explicit feature removal', () => {
+  const values = {
+    ...form,
+    protocol_routing_enabled: true,
+    protocol_routing_profile: 'shared',
+    protocol_routing_defaults: '{}',
+    protocol_routing_models: JSON.stringify({
+      model: {
+        endpoint_overrides: [
+          {
+            format: 'openai',
+            features: { tools: false, stream: true },
+            verified: false,
+          },
+        ],
+      },
+    }),
+  }
+  expect(channelFormSchema.safeParse(values).success).toBe(true)
+  const saved = JSON.parse(buildSettingJSON(values)).protocol_routing
+  expect(saved.profile).toBe('shared')
+  expect(saved.defaults).toEqual({})
+  expect(saved.models.model.endpoint_overrides[0]).toEqual({
+    format: 'openai',
+    features: { tools: false, stream: true },
+    verified: false,
+  })
+  expect(
+    channelFormSchema.safeParse({
+      ...values,
+      protocol_routing_profile: 'bad profile',
+    }).success
+  ).toBe(false)
+})
+
+test('inline defaults require a complete base and can include endpoint differences', () => {
+  const values = {
+    ...form,
+    protocol_routing_enabled: true,
+    protocol_routing_defaults: JSON.stringify({
+      ...policy,
+      endpoint_overrides: [{ format: 'openai', features: { tools: false } }],
+    }),
+  }
+  expect(channelFormSchema.safeParse(values).success).toBe(true)
+  expect(
+    channelFormSchema.safeParse({ ...values, protocol_routing_defaults: '{}' })
+      .success
+  ).toBe(false)
 })

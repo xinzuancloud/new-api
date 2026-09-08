@@ -48,16 +48,22 @@ import {
   PROTOCOL_FEATURES,
   PROTOCOL_FORMATS,
 } from '../../../lib/protocol-routing'
+import { ChannelProfileField } from './channel-profile-field'
 
 export function ChannelProtocolRoutingSection(props: {
   form: UseFormReturn<ChannelFormValues>
   disabled?: boolean
   id?: string
+  channelId?: number
 }) {
   const { t } = useTranslation()
   const enabled = useWatch({
     control: props.form.control,
     name: 'protocol_routing_enabled',
+  })
+  const profile = useWatch({
+    control: props.form.control,
+    name: 'protocol_routing_profile',
   })
   const defaults = useWatch({
     control: props.form.control,
@@ -96,7 +102,7 @@ export function ChannelProtocolRoutingSection(props: {
                     if (checked && !defaults?.trim()) {
                       props.form.setValue(
                         'protocol_routing_defaults',
-                        PROTOCOL_DEFAULT_POLICY_JSON,
+                        profile ? '{}' : PROTOCOL_DEFAULT_POLICY_JSON,
                         { shouldDirty: true }
                       )
                       props.form.setValue('protocol_routing_models', '{}', {
@@ -110,11 +116,16 @@ export function ChannelProtocolRoutingSection(props: {
             </FormItem>
           )}
         />
-        {(enabled || defaults?.trim()) && (
+        {(enabled || profile || defaults?.trim()) && (
           <fieldset
             disabled={props.disabled}
             className='space-y-4 disabled:opacity-60'
           >
+            <ChannelProfileField
+              form={props.form}
+              channelId={props.channelId}
+              disabled={props.disabled}
+            />
             <FormField
               control={props.form.control}
               name='protocol_routing_account_resource'
@@ -225,7 +236,7 @@ export function ChannelProtocolRoutingSection(props: {
                   <FormLabel>{t('Model protocol overrides')}</FormLabel>
                   <FormDescription>
                     {t(
-                      'JSON object keyed by mapped upstream model name. Each value replaces the entire default policy; use {} for no overrides.'
+                      'JSON object keyed by mapped upstream model name. Partial policies inherit defaults; use {} for no differences.'
                     )}
                   </FormDescription>
                   <FormControl>

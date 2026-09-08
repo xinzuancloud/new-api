@@ -1,3 +1,4 @@
+import { zodResolver } from '@hookform/resolvers/zod'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -16,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { zodResolver } from '@hookform/resolvers/zod'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useForm } from 'react-hook-form'
@@ -33,6 +34,14 @@ import {
 } from '../../../../lib/channel-form'
 import { ChannelProtocolRoutingSection } from '../channel-protocol-routing-section'
 
+vi.mock('../../../../lib/protocol-profiles-api', () => ({
+  protocolProfilesAPI: {
+    catalog: vi
+      .fn()
+      .mockResolvedValue({ revision: '1', profiles: {}, channels: [] }),
+  },
+}))
+
 function Editor(props: {
   disabled?: boolean
   onSave?: (value: string) => void
@@ -46,16 +55,25 @@ function Editor(props: {
     },
   })
   return (
-    <Form {...form}>
-      <form
-        onSubmit={form.handleSubmit((values) =>
-          props.onSave?.(buildSettingJSON(values))
-        )}
-      >
-        <ChannelProtocolRoutingSection form={form} disabled={props.disabled} />
-        <Button type='submit'>Save</Button>
-      </form>
-    </Form>
+    <QueryClientProvider
+      client={
+        new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      }
+    >
+      <Form {...form}>
+        <form
+          onSubmit={form.handleSubmit((values) =>
+            props.onSave?.(buildSettingJSON(values))
+          )}
+        >
+          <ChannelProtocolRoutingSection
+            form={form}
+            disabled={props.disabled}
+          />
+          <Button type='submit'>Save</Button>
+        </form>
+      </Form>
+    </QueryClientProvider>
   )
 }
 
@@ -94,12 +112,12 @@ describe('channel protocol routing editor', () => {
       name: 'Model protocol overrides',
     })
     fireEvent.input(overrides, {
-      target: { value: '{"mapped-model":{"loss_policy":"safe"}}' },
+      target: { value: '{"mapped-model":{"loss_policy":"invalid"}}' },
     })
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(
       await screen.findByText(
-        'Model overrides must map upstream model names to complete protocol policies'
+        'Model overrides must map upstream model names to valid protocol differences'
       )
     ).toBeVisible()
     expect(overrides).toHaveAttribute('aria-invalid', 'true')

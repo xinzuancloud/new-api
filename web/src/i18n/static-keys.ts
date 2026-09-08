@@ -21,7 +21,10 @@ For commercial licensing, please contact support@quantumnous.com
 export const STATIC_I18N_KEYS = [
   'Account resource must be a trimmed identifier of at most 128 bytes',
   'Invalid protocol policy: check formats, endpoint paths, features, verification, and loss policy',
-  'Model overrides must map upstream model names to complete protocol policies',
+  'Model overrides must map upstream model names to valid protocol differences',
+  'Invalid protocol configuration',
+  'Invalid protocol request',
+  'Protocol configuration changed. Refresh and preview again.',
   'Account deletion',
   // Model management and metadata synchronization
   'Model management',

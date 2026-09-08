@@ -30,10 +30,11 @@ import {
   RefreshCw,
   ArrowUpFromLine,
 } from 'lucide-react'
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { LoadingState } from '@/components/loading-state'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -66,6 +67,10 @@ import {
 } from '../lib'
 import { useChannels } from './channels-provider'
 
+const ProtocolProfileManager = lazy(
+  () => import('./protocol-profiles/protocol-profile-manager')
+)
+
 export function ChannelsPrimaryButtons() {
   const { t } = useTranslation()
   const {
@@ -80,6 +85,7 @@ export function ChannelsPrimaryButtons() {
     upstream,
   } = useChannels()
   const queryClient = useQueryClient()
+  const [showProfiles, setShowProfiles] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [showConsistencyDialog, setShowConsistencyDialog] = useState(false)
   const [isRepairingConsistency, setIsRepairingConsistency] = useState(false)
@@ -177,6 +183,18 @@ export function ChannelsPrimaryButtons() {
             <MoreHorizontal className='h-4 w-4' />
           </DropdownMenuTrigger>
           <DropdownMenuContent align='end' className='w-56'>
+            <DropdownMenuItem
+              disabled={
+                !hasPermission(
+                  currentUser,
+                  ADMIN_PERMISSION_RESOURCES.CHANNEL,
+                  ADMIN_PERMISSION_ACTIONS.READ
+                )
+              }
+              onClick={() => setShowProfiles(true)}
+            >
+              {t('Shared protocol profiles')}
+            </DropdownMenuItem>
             {/* Mobile-only: toggle switches */}
             <DropdownMenuCheckboxItem
               className='sm:hidden'
@@ -285,6 +303,11 @@ export function ChannelsPrimaryButtons() {
         </DropdownMenu>
       </div>
 
+      {showProfiles && (
+        <Suspense fallback={<LoadingState />}>
+          <ProtocolProfileManager onClose={() => setShowProfiles(false)} />
+        </Suspense>
+      )}
       <ConfirmDialog
         open={showDeleteDialog}
         onOpenChange={setShowDeleteDialog}

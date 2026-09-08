@@ -43,7 +43,7 @@ const unique = (values: readonly unknown[]) =>
   new Set(values).size === values.length
 const byteLength = (value: string) => new TextEncoder().encode(value).length
 
-export const protocolModelPolicySchema = z
+const completeProtocolModelPolicySchema = z
   .object({
     entry_formats: z.array(formatSchema).min(1).max(3).refine(unique),
     endpoints: z
@@ -88,6 +88,32 @@ export const protocolModelPolicySchema = z
   })
   .strict()
 
+export const protocolModelPolicySchema = completeProtocolModelPolicySchema
+  .partial()
+  .extend({
+    endpoint_overrides: z
+      .array(
+        z
+          .object({
+            format: formatSchema,
+            path: completeProtocolModelPolicySchema.shape.endpoints.element.shape.path.optional(),
+            features: z
+              .partialRecord(z.enum(PROTOCOL_FEATURES), z.boolean())
+              .optional(),
+            verified: z.boolean().optional(),
+            verified_at:
+              completeProtocolModelPolicySchema.shape.endpoints.element.shape
+                .verified_at,
+          })
+          .strict()
+      )
+      .max(16)
+      .optional(),
+  })
+  .strict()
+
+export const protocolProfileIdSchema = z.string().regex(/^[a-z0-9_-]{1,64}$/)
+
 export const protocolModelOverridesSchema = z
   .record(
     z
@@ -106,6 +132,7 @@ export const protocolModelOverridesSchema = z
 export type ProtocolModelPolicy = z.infer<typeof protocolModelPolicySchema>
 export interface ProtocolRoutingSettings {
   enabled: boolean
+  profile?: string
   account_resource?: string
   quota_scope?: 'model' | 'account'
   defaults: ProtocolModelPolicy
@@ -141,7 +168,8 @@ const emptyProtocolPolicySchema = z
 export function validateProtocolPolicyJSON(
   value: string | undefined,
   models = false,
-  allowEmpty = false
+  allowEmpty = false,
+  inherited = false
 ): boolean {
   try {
     const parsed: unknown = JSON.parse(value || '')
@@ -152,9 +180,11 @@ export function validateProtocolPolicyJSON(
     ) {
       return true
     }
-    return (
-      models ? protocolModelOverridesSchema : protocolModelPolicySchema
-    ).safeParse(parsed).success
+    if (models) return protocolModelOverridesSchema.safeParse(parsed).success
+    if (inherited) return protocolModelPolicySchema.safeParse(parsed).success
+    return protocolModelPolicySchema
+      .required({ entry_formats: true, endpoints: true })
+      .safeParse(parsed).success
   } catch {
     return false
   }

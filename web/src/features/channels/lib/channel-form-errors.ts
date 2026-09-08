@@ -35,6 +35,7 @@ const ADVANCED_SETTINGS_FIELDS = new Set<FieldPath<ChannelFormValues>>([
   'header_override',
   'status_code_mapping',
   'advanced_custom',
+  'protocol_routing_profile',
   'protocol_routing_enabled',
   'protocol_routing_account_resource',
   'protocol_routing_quota_scope',

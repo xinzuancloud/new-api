@@ -256,6 +256,10 @@ export const channelFormSchema = z
     batch_add_set_key_prefix_2_name: z.boolean().optional(),
     key_mode: z.enum(['append', 'replace']).optional(), // For editing multi-key channels
     // Channel extra settings (stored in setting JSON, not sent directly)
+    protocol_routing_profile: z
+      .string()
+      .regex(/^$|^[a-z0-9_-]{1,64}$/)
+      .optional(),
     protocol_routing_enabled: z.boolean().optional(),
     protocol_routing_account_resource: z
       .string()
@@ -308,9 +312,10 @@ export const channelFormSchema = z
     ) {
       if (
         !validateProtocolPolicyJSON(
-          data.protocol_routing_defaults,
+          data.protocol_routing_defaults || '{}',
           false,
-          !data.protocol_routing_enabled
+          !data.protocol_routing_enabled,
+          Boolean(data.protocol_routing_profile)
         )
       ) {
         addRequiredIssue(
@@ -327,7 +332,7 @@ export const channelFormSchema = z
         addRequiredIssue(
           ctx,
           'protocol_routing_models',
-          'Model overrides must map upstream model names to complete protocol policies'
+          'Model overrides must map upstream model names to valid protocol differences'
         )
       }
     }
@@ -484,6 +489,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   batch_add_set_key_prefix_2_name: false,
   key_mode: 'append',
   // Channel extra settings
+  protocol_routing_profile: '',
   protocol_routing_enabled: false,
   protocol_routing_account_resource: '',
   protocol_routing_quota_scope: 'model',
@@ -530,6 +536,7 @@ export function transformChannelToFormDefaults(
   // Parse channel extra settings from setting field
   let extraSettings = {
     task_plugin_key: '',
+    protocol_routing_profile: '',
     protocol_routing_enabled: false,
     protocol_routing_account_resource: '',
     protocol_routing_quota_scope: 'model' as 'model' | 'account',
@@ -554,6 +561,7 @@ export function transformChannelToFormDefaults(
       )
       extraSettings = {
         task_plugin_key: parsed.task_plugin_key || '',
+        protocol_routing_profile: parsed.protocol_routing?.profile || '',
         protocol_routing_enabled: parsed.protocol_routing?.enabled === true,
         protocol_routing_account_resource:
           parsed.protocol_routing?.account_resource || '',
@@ -701,11 +709,15 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
   }
 
   if (
+    formData.protocol_routing_profile ||
     formData.protocol_routing_enabled ||
     formData.protocol_routing_defaults?.trim() ||
     existingSettings.protocol_routing !== undefined
   ) {
     settingObj.protocol_routing = {
+      ...(formData.protocol_routing_profile
+        ? { profile: formData.protocol_routing_profile }
+        : {}),
       enabled: formData.protocol_routing_enabled === true,
       account_resource: formData.protocol_routing_account_resource || '',
       quota_scope: formData.protocol_routing_quota_scope || 'model',

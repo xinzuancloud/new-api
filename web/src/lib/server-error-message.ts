@@ -17,6 +17,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 const serverErrorMessageKeys = {
+  invalid_protocol_configuration: 'Invalid protocol configuration',
+  invalid_protocol_request: 'Invalid protocol request',
+  protocol_revision_conflict:
+    'Protocol configuration changed. Refresh and preview again.',
   TELEGRAM_OAUTH_NOT_CONFIGURED:
     'Telegram OAuth is not configured or enabled. Please contact your administrator.',
   TELEGRAM_OAUTH_CONFLICT:
@@ -92,11 +96,11 @@ function serverErrorPayload(value: unknown): Record<string, unknown> | null {
 
 export function getServerErrorMessageKey(value: unknown): string | null {
   const payload = serverErrorPayload(value)
-  if (!payload || typeof payload.code !== 'string') return null
+  if (!payload) return null
+  const code = typeof payload.code === 'string' ? payload.code : payload.message
+  if (typeof code !== 'string') return null
 
   return (
-    serverErrorMessageKeys[
-      payload.code as keyof typeof serverErrorMessageKeys
-    ] ?? null
+    serverErrorMessageKeys[code as keyof typeof serverErrorMessageKeys] ?? null
   )
 }

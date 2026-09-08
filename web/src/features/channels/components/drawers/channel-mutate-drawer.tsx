@@ -282,6 +282,7 @@ const SENSITIVE_FORM_FIELDS = [
   'settings',
   'setting',
   'advanced_custom',
+  'protocol_routing_profile',
   'protocol_routing_enabled',
   'protocol_routing_account_resource',
   'protocol_routing_quota_scope',
@@ -340,6 +341,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     hasConfiguredOverrideValue(values.param_override) ||
     hasConfiguredOverrideValue(values.header_override) ||
     values.advanced_custom?.trim() ||
+    values.protocol_routing_profile ||
     values.protocol_routing_enabled ||
     values.protocol_routing_defaults?.trim() ||
     hasConfiguredOverrideValue(values.status_code_mapping) ||
@@ -731,6 +733,7 @@ export function ChannelMutateDrawer({
     'upstream_model_update_check_enabled'
   )
   const currentSettings = form.watch('settings')
+  const currentProtocolRoutingProfile = form.watch('protocol_routing_profile')
   const currentProtocolRoutingEnabled = form.watch('protocol_routing_enabled')
   const currentProtocolRoutingDefaults = form.watch('protocol_routing_defaults')
   const currentAdvancedCustom = form.watch('advanced_custom')
@@ -1058,7 +1061,9 @@ export function ChannelMutateDrawer({
     currentUpstreamModelUpdateIgnoredModels?.trim()
   )
   const protocolRoutingConfigured = Boolean(
-    currentProtocolRoutingEnabled || currentProtocolRoutingDefaults?.trim()
+    currentProtocolRoutingProfile ||
+    currentProtocolRoutingEnabled ||
+    currentProtocolRoutingDefaults?.trim()
   )
   const advancedConfigured = Boolean(
     protocolRoutingConfigured ||
@@ -4079,6 +4084,7 @@ export function ChannelMutateDrawer({
 
                         <ChannelProtocolRoutingSection
                           form={form}
+                          channelId={currentRow?.id}
                           disabled={sensitiveLocked || isSubmitting}
                           id={ADVANCED_SETTINGS_SECTION_IDS.protocolRouting}
                         />
