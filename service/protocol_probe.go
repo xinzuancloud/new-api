@@ -100,7 +100,7 @@ func BuildProtocolProbeFixture(format types.RelayFormat, modelName, check string
 		case types.RelayFormatClaude:
 			body["tools"] = []any{map[string]any{"type": "web_search_20250305", "name": "web_search", "max_uses": 1}}
 		case types.RelayFormatOpenAIResponses:
-			body["tools"] = []any{map[string]any{"type": "web_search", "search_context_size": "low"}}
+			body["tools"] = []any{map[string]any{"type": "web_search"}}
 			body["include"] = []string{"web_search_call.action.sources"}
 			body["max_tool_calls"] = 1
 		case types.RelayFormatOpenAI:

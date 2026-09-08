@@ -30,6 +30,7 @@ func TestProtocolProbeEvidence(t *testing.T) {
 		{"ignored tool", types.RelayFormatOpenAI, "tools", 200, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n", "unknown"},
 		{"truncated SSE", types.RelayFormatClaude, "stream", 200, "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n", "unknown"},
 		{"message", types.RelayFormatClaude, "text", 200, `{"type":"message","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`, "passed"},
+		{"search without results", types.RelayFormatOpenAIResponses, "web_search", 200, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"web_search_call\",\"status\":\"completed\"}]}}\n\n", "unknown"},
 		{"responses incomplete", types.RelayFormatOpenAIResponses, "text", 200, `{"status":"incomplete","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`, "unknown"},
 		{"forged text tool", types.RelayFormatClaude, "tools", 200, "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"newapi_probe({value:7})\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", "unknown"},
 	} {
@@ -76,22 +77,38 @@ func TestProtocolProbeNativeToolEvidence(t *testing.T) {
 			result := service.EvaluateProtocolProbe(tc.format, tc.check, 200, []byte(tc.body))
 			assert.Equal(t, "passed", result.Outcome)
 			assert.True(t, result.Terminal)
-			if tc.check != "tools" && tc.check != "namespaces" {
+			if tc.check == "web_search" && tc.format != types.RelayFormatOpenAIResponses {
 				return
 			}
 			// Some thinking endpoints reject forced selection while supporting
 			// real tool calls with automatic selection. Probe that shared contract.
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var body map[string]any
-				require.NoError(t, common.DecodeJson(r.Body, &body))
-				choice := body["tool_choice"]
-				if tc.format == types.RelayFormatClaude {
-					object, _ := choice.(map[string]any)
-					choice = object["type"]
+				var body struct {
+					ToolChoice any              `json:"tool_choice"`
+					Tools      []map[string]any `json:"tools"`
+					MaxCalls   int              `json:"max_tool_calls"`
+					Include    []string         `json:"include"`
 				}
-				if choice != "auto" {
-					w.WriteHeader(http.StatusBadRequest)
-					return
+				require.NoError(t, common.DecodeJson(r.Body, &body))
+				if tc.check == "web_search" {
+					require.Len(t, body.Tools, 1)
+					assert.Equal(t, "web_search", body.Tools[0]["type"])
+					assert.Equal(t, 1, body.MaxCalls)
+					assert.Equal(t, []string{"web_search_call.action.sources"}, body.Include)
+					if _, tuned := body.Tools[0]["search_context_size"]; tuned {
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+				} else {
+					choice := body.ToolChoice
+					if tc.format == types.RelayFormatClaude {
+						object, _ := choice.(map[string]any)
+						choice = object["type"]
+					}
+					if choice != "auto" {
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
 				_, _ = w.Write([]byte(tc.body))
