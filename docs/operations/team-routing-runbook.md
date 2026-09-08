@@ -90,3 +90,20 @@ Plus 的 Kimi 订阅白名单是 `kimi-for-coding`、`kimi-k3-256k`。Plus 火�
 排查时关联客户端错误中的 request_id 与应用日志，再核对客户端所选模型及映射后的模型策略。区分配置遗漏、能力识别错误和上游确实不支持；只有实际核实支持后才在渠道 UI 的默认策略或模型覆盖中声明能力。不要直接勾选所有能力，也不要静默删除图片、工具或上下文以换取 HTTP 200。`hosted_tools` 指上游托管工具能力；它不证明请求一定开启了网页搜索，须继续核对实际工具类型。
 
 2026-09-08 16:30/16:31（UTC+8）的 Codex Desktop Windows `/v1/responses` 请求在旧的通用错误处被拦截。旧日志未保留能力明细，不能追溯确切缺失项；须用补丁后的客户端重试确认。诊断补丁本身不代表这个客户端的兼容性问题已经修复。
+
+### kimi-k3 原生 Responses 修正（2026-09-08）
+
+用户确认模型为 `kimi-k3`、缺失项为 `hosted_tools`。同版本 Codex CLI 0.153.4 的本地离线请求形状检查发现 function、namespace 与 web_search 并存。namespace 是客户端工具分组，不能自动归为托管执行；网关现在递归检查其中的工具声明，并保留深度限制和跨格式损耗检查。
+
+按实际供应商入口登记原生接口，不依据 new-api 旧适配器的 `not implemented` 推断供应商能力。此次修改现有14条渠道的协议配置，未修改用户/分组/模型授权、供应商顺序、价格或渠道启停。
+
+| 供应商与模型 | 原生 Responses 路径（附加在当前 Base URL） | 本次验证与配置边界 |
+| --- | --- | --- |
+| Kimi 订阅四个现有模型 | `/responses` | 四个模型的普通函数调用均完成；K3 的 SSE、namespace、联网搜索完成。默认策略新增原生 Responses，映射后 `k3` 的覆盖策略额外声明 hosted_tools。 |
+| 火山 `kimi-k3` | `/v3/responses` | 基础请求、SSE、普通函数调用通过；联网与 namespace 探针未产生相应工具调用，未据 HTTP 200 宣称支持这些能力。仅为该映射模型新增覆盖策略。 |
+| 天翼 `kimi-k3` | `/v1/responses` | 非流式返回合法的输出长度截断响应和用量；联网 SSE 探针超时，未声明 stream 或 hosted_tools。仍仅受原 VIP 权限控制。 |
+| SenseNova | `/v1/responses` | 当前入口返回 NOT_FOUND，保留已验证 Chat/Messages 路径；不据此断言供应商未来或其他入口永不支持。 |
+
+[Kimi 官方 Codex 接入文档](https://www.kimi.com/code/docs/third-party-tools/codex.html)明确说明原生 Responses 和联网搜索。实测 `web_search` 可执行并正常完成；`web_search_preview` 以及测试中的强制 tool_choice 组合返回上游400，未静默改写工具或关闭用户功能。
+
+排查能力时区分协议入口、具体模型、工具类型和参数组合。先核实兼容的原生路径，再考虑转换；原生路径也不意味着该模型实现协议中的所有工具。后续监测结合 HTTP、stream_status、protocol_route 和实际工具调用，不能把工具声明存在或 HTTP 200 当作功能已执行。
