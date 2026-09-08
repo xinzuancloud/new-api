@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,7 +29,7 @@ import (
 
 func TestProtocolProbeWorkflow(t *testing.T) {
 	// Dedicated disposable databases only. The same contract runs on all engines.
-	var dialector gorm.Dialector = sqlite.Open(":memory:")
+	var dialector gorm.Dialector = sqlite.Open(filepath.Join(t.TempDir(), "profiles.db") + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_txlock=immediate")
 	switch os.Getenv("PROTOCOL_TEST_DIALECT") {
 	case "mysql":
 		dialector = mysql.Open(os.Getenv("PROTOCOL_TEST_DSN"))
@@ -38,7 +40,7 @@ func TestProtocolProbeWorkflow(t *testing.T) {
 	require.NoError(t, err)
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
-	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxOpenConns(4)
 	previous, cache := model.DB, common.MemoryCacheEnabled
 	previousDialect := common.MainDatabaseType()
 	common.SetMainDatabaseType(common.DatabaseType(db.Dialector.Name()))
@@ -92,6 +94,41 @@ func TestProtocolProbeWorkflow(t *testing.T) {
 	stored, err := model.ReadProtocolProbeReport(nil, report.ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, "pending", stored.Status)
+	// Two transactions claiming the same report must not both start paid work.
+	startClaims := make(chan struct{})
+	claimResults := make(chan error, 2)
+	var claims sync.WaitGroup
+	for range 2 {
+		claims.Add(1)
+		go func() {
+			defer claims.Done()
+			<-startClaims
+			_, e := model.MutateProtocolProbeReport(report.ID, func(saved *model.ProtocolProbeReport) error {
+				if saved.RunID != "" {
+					return model.ErrProtocolConflict
+				}
+				saved.RunID = "claimed"
+				saved.LeaseUntil = time.Now().Add(time.Minute).Unix()
+				return nil
+			})
+			claimResults <- e
+		}()
+	}
+	close(startClaims)
+	claims.Wait()
+	close(claimResults)
+	successfulClaims := 0
+	for e := range claimResults {
+		if e == nil {
+			successfulClaims++
+		} else {
+			require.ErrorIs(t, e, model.ErrProtocolConflict)
+		}
+	}
+	assert.Equal(t, 1, successfulClaims)
+	_, err = model.MutateProtocolProbeReport(report.ID, func(saved *model.ProtocolProbeReport) error { saved.RunID = ""; saved.LeaseUntil = 0; return nil })
+	require.NoError(t, err)
+
 	invoke := func(handler gin.HandlerFunc, payload any) *httptest.ResponseRecorder {
 		data, err := common.Marshal(payload)
 		require.NoError(t, err)

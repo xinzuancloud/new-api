@@ -26,8 +26,8 @@ type ProtocolRoutingSettings struct {
 
 type ProtocolModelPolicy struct {
 	EndpointOverrides []ProtocolEndpointOverride `json:"endpoint_overrides,omitempty"`
-	EntryFormats      []types.RelayFormat        `json:"entry_formats"`
-	Endpoints         []ProtocolEndpoint         `json:"endpoints"`
+	EntryFormats      []types.RelayFormat        `json:"entry_formats,omitempty"`
+	Endpoints         []ProtocolEndpoint         `json:"endpoints,omitempty"`
 	LossPolicy        string                     `json:"loss_policy,omitempty"`
 }
 
