@@ -212,6 +212,9 @@ export function ChannelProtocolRoutingSection(props: {
               )}{' '}
               {t(
                 'The stateful and background feature fields are reserved for future support; declaring them does not enable these requests.'
+              )}{' '}
+              {t(
+                'Declare context_editing only for verified native Claude context management. This capability does not enable server-side conversation state.'
               )}
             </p>
             <FormField

@@ -97,13 +97,13 @@ func (p ProtocolModelPolicy) Validate() error {
 			return fmt.Errorf("duplicate endpoint")
 		}
 		seen[key] = true
-		if len(endpoint.Features) > 12 {
+		if len(endpoint.Features) > 13 {
 			return fmt.Errorf("endpoint has too many features")
 		}
 		features := map[string]bool{}
 		for _, feature := range endpoint.Features {
 			switch feature {
-			case "stream", "tools", "parallel_tools", "images", "files", "audio", "video", "structured_output", "reasoning", "hosted_tools", "stateful", "background":
+			case "stream", "tools", "parallel_tools", "images", "files", "audio", "video", "structured_output", "reasoning", "hosted_tools", "context_editing", "stateful", "background":
 			default:
 				return fmt.Errorf("endpoint feature is invalid")
 			}

@@ -34,6 +34,7 @@ export const PROTOCOL_FEATURES = [
   'structured_output',
   'reasoning',
   'hosted_tools',
+  'context_editing',
   'stateful',
   'background',
 ] as const
@@ -65,7 +66,7 @@ export const protocolModelPolicySchema = z
               ),
             features: z
               .array(z.enum(PROTOCOL_FEATURES))
-              .max(12)
+              .max(PROTOCOL_FEATURES.length)
               .refine(unique)
               .optional(),
             verified: z.boolean(),

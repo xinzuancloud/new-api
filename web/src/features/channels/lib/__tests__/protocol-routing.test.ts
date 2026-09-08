@@ -220,3 +220,28 @@ describe('protocol routing validation boundaries', () => {
     ).toEqual(modelPolicy)
   })
 })
+
+test('accepts and preserves explicitly advertised native Claude context editing', () => {
+  const nativePolicy = {
+    entry_formats: ['claude'],
+    endpoints: [
+      {
+        format: 'claude',
+        path: '/v1/messages',
+        features: ['context_editing'],
+        verified: true,
+      },
+    ],
+    loss_policy: 'safe',
+  }
+  const values = {
+    ...form,
+    protocol_routing_enabled: true,
+    protocol_routing_defaults: JSON.stringify(nativePolicy),
+    protocol_routing_models: '{}',
+  }
+  expect(channelFormSchema.safeParse(values).success).toBe(true)
+  expect(
+    JSON.parse(buildSettingJSON(values)).protocol_routing.defaults
+  ).toEqual(nativePolicy)
+})

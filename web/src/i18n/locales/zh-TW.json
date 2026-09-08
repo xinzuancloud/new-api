@@ -1434,6 +1434,7 @@
     "Days to Retain": "保留天數",
     "decides the top-up ratio, which groups the user can pick for tokens, and whether an override ratio applies.": "決定儲值倍率、用戶建令牌時可選哪些分組，以及是否命中覆蓋倍率。",
     "decides which channels are used and which base ratio applies.": "決定走哪些渠道、用哪個基礎倍率。",
+    "Declare context_editing only for verified native Claude context management. This capability does not enable server-side conversation state.": "僅為已驗證的原生 Claude 上下文管理宣告 context_editing。此能力不會啟用伺服器端對話狀態。",
     "Declare entry_formats, endpoints, and loss_policy (safe, allow, strict). Only verified endpoints are eligible; verify capabilities with your provider before setting verified to true.": "宣告 entry_formats、endpoints 和 loss_policy（safe、allow、strict）。僅已驗證端點可用；將 verified 設為 true 前，請先向供應商確認能力。",
     "Declare only verified features: {{features}}. Stateful and background requests are currently unsupported.": "僅宣告已驗證的能力：{{features}}。目前不支援有狀態及背景請求。",
     "Declared capabilities": "宣告的能力",

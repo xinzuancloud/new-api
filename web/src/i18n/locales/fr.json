@@ -1434,6 +1434,7 @@
     "Days to Retain": "Jours à conserver",
     "decides the top-up ratio, which groups the user can pick for tokens, and whether an override ratio applies.": "détermine le taux de recharge, les groupes que l’utilisateur peut choisir pour ses jetons, et si un taux de remplacement s’applique.",
     "decides which channels are used and which base ratio applies.": "détermine les canaux utilisés et le taux de base appliqué.",
+    "Declare context_editing only for verified native Claude context management. This capability does not enable server-side conversation state.": "Déclarez context_editing uniquement pour la gestion du contexte Claude natif vérifiée. Cette capacité n’active pas l’état des conversations côté serveur.",
     "Declare entry_formats, endpoints, and loss_policy (safe, allow, strict). Only verified endpoints are eligible; verify capabilities with your provider before setting verified to true.": "Déclarez entry_formats, endpoints et loss_policy (safe, allow, strict). Seuls les points vérifiés sont utilisables ; confirmez leurs capacités avec votre fournisseur avant de définir verified sur true.",
     "Declare only verified features: {{features}}. Stateful and background requests are currently unsupported.": "Déclarez uniquement les capacités vérifiées : {{features}}. Les requêtes avec état ou en arrière-plan ne sont pas encore prises en charge.",
     "Declared capabilities": "Capacités déclarées",

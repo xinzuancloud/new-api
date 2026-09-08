@@ -1434,6 +1434,7 @@
     "Days to Retain": "Days to Retain",
     "decides the top-up ratio, which groups the user can pick for tokens, and whether an override ratio applies.": "decides the top-up ratio, which groups the user can pick for tokens, and whether an override ratio applies.",
     "decides which channels are used and which base ratio applies.": "decides which channels are used and which base ratio applies.",
+    "Declare context_editing only for verified native Claude context management. This capability does not enable server-side conversation state.": "Declare context_editing only for verified native Claude context management. This capability does not enable server-side conversation state.",
     "Declare entry_formats, endpoints, and loss_policy (safe, allow, strict). Only verified endpoints are eligible; verify capabilities with your provider before setting verified to true.": "Declare entry_formats, endpoints, and loss_policy (safe, allow, strict). Only verified endpoints are eligible; verify capabilities with your provider before setting verified to true.",
     "Declare only verified features: {{features}}. Stateful and background requests are currently unsupported.": "Declare only verified features: {{features}}. Stateful and background requests are currently unsupported.",
     "Declared capabilities": "Declared capabilities",

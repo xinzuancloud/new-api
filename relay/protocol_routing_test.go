@@ -185,3 +185,18 @@ func TestProtocolRoutingLeavesOtherRelayAPIsOnLegacyPath(t *testing.T) {
 	assert.Nil(t, plan)
 	assert.Nil(t, err)
 }
+
+func TestNativeClaudeContextEditingIsPreserved(t *testing.T) {
+	for _, contextManagement := range []string{`{}`, `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`} {
+		c, info := protocolTestContext(t, types.RelayFormatClaude, `{"model":"public-model","messages":[{"role":"user","content":"hello"}],"max_tokens":32,"context_management":`+contextManagement+`}`, "https://example.invalid", types.RelayFormatClaude)
+		settings, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+		settings.ProtocolRouting.Defaults.Endpoints[0].Features = append(settings.ProtocolRouting.Defaults.Endpoints[0].Features, "context_editing")
+		plan, apiErr := PrepareProtocolRequest(c, info)
+		require.Nil(t, apiErr)
+		require.NotNil(t, plan)
+		var sent, want map[string]any
+		require.NoError(t, common.Unmarshal(plan.Body, &sent))
+		require.NoError(t, common.Unmarshal([]byte(contextManagement), &want))
+		assert.Equal(t, want, sent["context_management"])
+	}
+}

@@ -1434,6 +1434,7 @@
     "Days to Retain": "保持日数",
     "decides the top-up ratio, which groups the user can pick for tokens, and whether an override ratio applies.": "チャージ倍率、トークン作成時に選べるグループ、上書き倍率の適用有無を決めます。",
     "decides which channels are used and which base ratio applies.": "使用するチャネルと適用される基本倍率を決めます。",
+    "Declare context_editing only for verified native Claude context management. This capability does not enable server-side conversation state.": "検証済みのネイティブ Claude コンテキスト管理にのみ context_editing を宣言してください。この機能はサーバー側の会話状態を有効にしません。",
     "Declare entry_formats, endpoints, and loss_policy (safe, allow, strict). Only verified endpoints are eligible; verify capabilities with your provider before setting verified to true.": "entry_formats、endpoints、loss_policy（safe、allow、strict）を指定します。検証済みエンドポイントのみ利用可能です。verified を true にする前にプロバイダーの対応機能を確認してください。",
     "Declare only verified features: {{features}}. Stateful and background requests are currently unsupported.": "検証済み機能のみ指定してください：{{features}}。ステートフルおよびバックグラウンドリクエストは現在未対応です。",
     "Declared capabilities": "宣言された権限",

@@ -102,3 +102,10 @@ Implementation integrates the deployed custom branch with the exact upstream rc.
 - Deployment application script passed real PostgreSQL dry-run/apply/idempotent-no-op with quoted resource identifiers; preserves unrelated settings and snapshots only prior protocol configuration.
 
 Production rollout version, hashes and passive verification are recorded after deployment.
+
+
+### Context-editing hotfix
+
+A user-reported400 exposed overly broad stateful classification on native Messages. Native context editing is now distinct from stored conversation/background state. Exact native Claude/Responses preservation of context_management objects/arrays/empty objects is covered; safe/strict cross-format and Chat paths still reject unsupported preservation. Full disposable application matrix199/199 passed,59 settlements and6188 internal quota conserved; artifact `/private/tmp/protocol-e2e/run-20260908-151956/results.json`. Focused tests and independent RelayKit build passed. Full frontend730 tests passed when run separately from heavy concurrent Go compilation; an unrelated metadata-editing timing failure occurred under simultaneous load and is retained in `/private/tmp/protocol-context-web.log` for transparency.
+
+Native `/v1/messages` plus context_management was verified via bearer authentication on Kimi, SenseNova and Volcengine with small requests; no request content or credentials were logged in the evidence. No CTYun paid probe was made.

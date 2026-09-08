@@ -75,3 +75,10 @@ Plus 的 Kimi 订阅白名单是 `kimi-for-coding`、`kimi-k3-256k`。Plus 火�
 `account_resource` 为非秘密账号资源标识；同一账号的渠道别名使用同一个值。`quota_scope` 可为 model（默认，使用链式映射后的上游模型）或 account。共享冷却和本次请求排除均跨别名生效，不重新尝试同一个资源。未配置标识时沿用渠道身份；多 Key 渠道仍以渠道为资源，不声称已支持 Key 级独立账号轮换。
 
 现有调用日志显示转换链和最终协议；管理员信息增加 protocol_route/source/target/path/loss_policy 与协议候选跳过原因。监测脚本增加 protocol_routes 聚合。SQL 初始配置可用 `ops/protocol-routing-configure.py`，默认只预览；`--apply` 在乐观并发检查的事务内仅更新协议字段，0600 快照仅保存原协议字段。SQL 更新后须正常重启/刷新渠道缓存。回滚恢复快照中的协议字段和原镜像，不恢复整库，也不修改价格或渠道启停。
+
+
+### 原生上下文编辑与服务端会话状态
+
+`context_management` 表示请求内的上下文编辑指令，不能一概视为依赖网关会话存储。`context_editing` 能力仅在已验证的原生 Messages/Responses 路径保留整个字段（包括空对象）；安全/严格跨协议转换仍拒绝丢弃它，原生 Chat 的 DTO 不支持该字段，所以即使误声明能力也拒绝。`previous_response_id`、conversation/container 引用和 background 仍不由第一阶段模拟。发现用户原生 Messages 被旧的全局 stateful 检查误拦后，曾暂时禁用协议路由恢复原行为，再应用修正。
+
+实测 SenseNova、火山现有 Base URL 下的 `/v1/messages` 也能原生接受上下文编辑请求；初始配置为这些渠道补充已验证 Messages 端点，避免不必要的 Messages→Chat 损耗。Kimi 的两个原生格式已验证，仍保留其自身思考/强制工具参数限制。

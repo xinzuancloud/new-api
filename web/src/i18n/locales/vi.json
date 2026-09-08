@@ -1434,6 +1434,7 @@
     "Days to Retain": "Số ngày giữ lại",
     "decides the top-up ratio, which groups the user can pick for tokens, and whether an override ratio applies.": "quyết định hệ số nạp tiền, các nhóm người dùng có thể chọn cho token, và có áp dụng hệ số ghi đè hay không.",
     "decides which channels are used and which base ratio applies.": "quyết định dùng kênh nào và áp dụng hệ số cơ bản nào.",
+    "Declare context_editing only for verified native Claude context management. This capability does not enable server-side conversation state.": "Chỉ khai báo context_editing cho tính năng quản lý ngữ cảnh Claude gốc đã xác minh. Khả năng này không bật trạng thái hội thoại phía máy chủ.",
     "Declare entry_formats, endpoints, and loss_policy (safe, allow, strict). Only verified endpoints are eligible; verify capabilities with your provider before setting verified to true.": "Khai báo entry_formats, endpoints và loss_policy (safe, allow, strict). Chỉ điểm cuối đã xác minh mới được dùng; xác nhận khả năng với nhà cung cấp trước khi đặt verified thành true.",
     "Declare only verified features: {{features}}. Stateful and background requests are currently unsupported.": "Chỉ khai báo tính năng đã xác minh: {{features}}. Hiện chưa hỗ trợ yêu cầu có trạng thái và chạy nền.",
     "Declared capabilities": "Quyền được khai báo",

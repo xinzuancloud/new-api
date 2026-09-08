@@ -79,6 +79,11 @@ func ValidateProtocolEndpointFeatures(endpoint dto.ProtocolEndpoint, format type
 }
 
 func validateProtocolFeatures(endpoint dto.ProtocolEndpoint, required map[string]bool) error {
+	// The Chat DTO has no context_management field. A declaration cannot make
+	// this wire adapter preserve context-editing directives.
+	if endpoint.Format == types.RelayFormatOpenAI && required["context_editing"] {
+		return fmt.Errorf("OpenAI Chat endpoint cannot preserve context_management")
+	}
 	available := make(map[string]bool, len(endpoint.Features))
 	for _, feature := range endpoint.Features {
 		available[feature] = true
@@ -106,10 +111,28 @@ func protocolRequiredFeatures(request any) (map[string]bool, error) {
 		return nil, fmt.Errorf("protocol routing requires a request object")
 	}
 	required := protocolRequestFeatures(body)
-	if required["stateful"] || required["background"] {
-		return nil, fmt.Errorf("stateful/background routing is not supported")
+	if err := protocolStatefulRoutingError(body, required); err != nil {
+		return nil, err
 	}
 	return required, nil
+}
+
+// Context-editing directives are capabilities, not stored conversation
+// references. Only actual stateful/background controls reach this diagnostic.
+func protocolStatefulRoutingError(body map[string]any, required map[string]bool) error {
+	if !required["stateful"] && !required["background"] {
+		return nil
+	}
+	fields := make([]string, 0, 4)
+	for _, field := range []string{"background", "container", "conversation", "previous_response_id"} {
+		if protocolValuePresent(body[field]) {
+			fields = append(fields, field)
+		}
+	}
+	if len(fields) == 0 {
+		return fmt.Errorf("stateful/background routing is not supported")
+	}
+	return fmt.Errorf("stateful/background routing is not supported for fields: %s", strings.Join(fields, ", "))
 }
 
 func protocolRequestFeatures(body map[string]any) map[string]bool {
@@ -118,7 +141,7 @@ func protocolRequestFeatures(body map[string]any) map[string]bool {
 		"stream": "stream", "parallel_tool_calls": "parallel_tools", "tools": "tools", "functions": "tools", "function_call": "tools", "tool_choice": "tools",
 		"reasoning": "reasoning", "reasoning_effort": "reasoning", "thinking": "reasoning", "enable_thinking": "reasoning", "thinking_budget": "reasoning", "think": "reasoning", "thinking_token_budget": "reasoning",
 		"audio": "audio", "web_search_options": "hosted_tools", "search_parameters": "hosted_tools", "mcp_servers": "hosted_tools", "enable_search": "hosted_tools", "web_search": "hosted_tools",
-		"previous_response_id": "stateful", "conversation": "stateful", "context_management": "stateful", "container": "stateful", "background": "background",
+		"previous_response_id": "stateful", "conversation": "stateful", "context_management": "context_editing", "container": "stateful", "background": "background",
 	} {
 		value := body[key]
 		if protocolValuePresent(value) {
@@ -300,8 +323,8 @@ func ValidateProtocolConversion(source, target types.RelayFormat, request any, l
 		return fmt.Errorf("protocol conversion requires a request object")
 	}
 	required := protocolRequestFeatures(body)
-	if required["stateful"] || required["background"] {
-		return fmt.Errorf("stateful/background routing is not supported")
+	if err := protocolStatefulRoutingError(body, required); err != nil {
+		return err
 	}
 	if source == target || lossPolicy == "allow" {
 		return nil
@@ -346,7 +369,7 @@ func ValidateProtocolConversion(source, target types.RelayFormat, request any, l
 		}
 		// Diagnostics use canonical field names only, never arbitrary client keys.
 		switch field {
-		case "n", "stop", "logprobs", "top_logprobs", "response_format", "text", "stop_sequences", "output_format", "tool_choice", "stream_options", "top_k", "metadata", "service_tier", "user", "store", "max_tokens_to_sample", "frequency_penalty", "presence_penalty", "seed", "logit_bias", "audio", "modalities", "prediction", "verbosity", "functions", "function_call", "web_search_options", "search_parameters", "include", "max_tool_calls", "truncation", "prompt_cache_retention", "cache_control", "extra_body":
+		case "context_management", "n", "stop", "logprobs", "top_logprobs", "response_format", "text", "stop_sequences", "output_format", "tool_choice", "stream_options", "top_k", "metadata", "service_tier", "user", "store", "max_tokens_to_sample", "frequency_penalty", "presence_penalty", "seed", "logit_bias", "audio", "modalities", "prediction", "verbosity", "functions", "function_call", "web_search_options", "search_parameters", "include", "max_tool_calls", "truncation", "prompt_cache_retention", "cache_control", "extra_body":
 			rejected[field] = true
 		default:
 			rejected["unmapped_fields"] = true

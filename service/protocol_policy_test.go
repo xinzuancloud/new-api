@@ -169,3 +169,67 @@ func TestProtocolConversionPreservesSupportedControls(t *testing.T) {
 		}
 	}
 }
+
+func TestProtocolContextEditingIsNativeCapability(t *testing.T) {
+	for _, source := range []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAIResponses} {
+		for _, context := range []any{map[string]any{}, map[string]any{"edits": []any{map[string]any{"type": "clear_thinking_20251015", "keep": "private-directive"}}}, []any{map[string]any{"type": "compaction", "compact_threshold": 1000}}} {
+			request := map[string]any{"model": "m", "context_management": context}
+			endpoint := dto.ProtocolEndpoint{Format: source, Path: "/v1/native", Verified: true, Features: []string{"context_editing"}}
+			policy := &dto.ProtocolRoutingSettings{Enabled: true, Defaults: dto.ProtocolModelPolicy{EntryFormats: []types.RelayFormat{source}, Endpoints: []dto.ProtocolEndpoint{endpoint}}}
+			require.NoError(t, policy.Validate())
+			candidates, err := BuildProtocolCandidates(policy, "m", source, request)
+			require.NoError(t, err)
+			require.Len(t, candidates, 1)
+			require.NoError(t, ValidateProtocolEndpointFeatures(endpoint, source, request))
+			require.NoError(t, ValidateProtocolConversion(source, source, request, "safe"))
+			undeclared := endpoint
+			undeclared.Features = nil
+			err = ValidateProtocolEndpointFeatures(undeclared, source, request)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), "stateful/background")
+			for _, target := range []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatClaude, types.RelayFormatOpenAIResponses} {
+				if source == target {
+					continue
+				}
+				for _, loss := range []string{"", "safe", "strict"} {
+					err = ValidateProtocolConversion(source, target, request, loss)
+					require.ErrorContains(t, err, "context_management")
+					assert.NotContains(t, err.Error(), "stateful/background")
+					assert.NotContains(t, err.Error(), "private-directive")
+				}
+				require.NoError(t, ValidateProtocolConversion(source, target, request, "allow"))
+			}
+		}
+	}
+	raw, err := common.Marshal(map[string]any{"edits": []any{map[string]any{"type": "clear_thinking_20251015"}}})
+	require.NoError(t, err)
+	typed := &dto.ClaudeRequest{Model: "m", ContextManagement: raw}
+	endpoint := dto.ProtocolEndpoint{Format: types.RelayFormatClaude, Path: "/v1/messages", Verified: true, Features: []string{"context_editing"}}
+	require.NoError(t, ValidateProtocolEndpointFeatures(endpoint, endpoint.Format, typed))
+	require.NoError(t, ValidateProtocolConversion(types.RelayFormatClaude, types.RelayFormatClaude, typed, "strict"))
+	// A declared capability cannot make the Chat DTO retain an unknown field.
+	chat := dto.ProtocolEndpoint{Format: types.RelayFormatOpenAI, Path: "/v1/chat/completions", Verified: true, Features: []string{"context_editing"}}
+	request := map[string]any{"model": "m", "context_management": map[string]any{}}
+	require.ErrorContains(t, ValidateProtocolEndpointFeatures(chat, chat.Format, request), "context_management")
+	for _, source := range []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatClaude, types.RelayFormatOpenAIResponses} {
+		policy := &dto.ProtocolRoutingSettings{Enabled: true, Defaults: dto.ProtocolModelPolicy{EntryFormats: []types.RelayFormat{source}, Endpoints: []dto.ProtocolEndpoint{chat}}}
+		candidates, err := BuildProtocolCandidates(policy, "m", source, request)
+		require.Error(t, err)
+		assert.Empty(t, candidates)
+	}
+	require.NoError(t, ValidateProtocolEndpointFeatures(chat, chat.Format, map[string]any{"model": "m"}))
+
+}
+
+func TestProtocolStatefulErrorsNameFieldsWithoutValues(t *testing.T) {
+	for _, field := range []string{"previous_response_id", "conversation", "container", "background"} {
+		request := map[string]any{field: "private-value", "context_management": map[string]any{}}
+		endpoint := dto.ProtocolEndpoint{Format: types.RelayFormatOpenAIResponses, Path: "/v1/responses", Verified: true, Features: []string{"context_editing", "stateful", "background"}}
+		for _, err := range []error{ValidateProtocolEndpointFeatures(endpoint, endpoint.Format, request), ValidateProtocolConversion(endpoint.Format, types.RelayFormatClaude, request, "allow")} {
+			require.ErrorContains(t, err, "stateful/background")
+			assert.Contains(t, err.Error(), field)
+			assert.NotContains(t, err.Error(), "private-value")
+			assert.NotContains(t, err.Error(), "context_management")
+		}
+	}
+}
