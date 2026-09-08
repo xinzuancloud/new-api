@@ -65,6 +65,8 @@ func TestProtocolProbeNativeToolEvidence(t *testing.T) {
 		format      types.RelayFormat
 		check, body string
 	}{
+		{types.RelayFormatOpenAI, "tools", "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"newapi_probe\",\"arguments\":\"{\\\"value\\\":7}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"},
+		{types.RelayFormatOpenAIResponses, "tools", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"id\":\"call\",\"name\":\"newapi_probe\",\"arguments\":\"{\\\"value\\\":7}\"}]}}\n\n"},
 		{types.RelayFormatClaude, "tools", "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"name\":\"newapi_probe\",\"input\":{}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"value\\\":7}\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n"},
 		{types.RelayFormatOpenAIResponses, "namespaces", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"id\":\"call\",\"namespace\":\"probe_namespace\",\"name\":\"newapi_probe\",\"arguments\":\"{\\\"value\\\":7}\"}]}}\n\n"},
 		{types.RelayFormatClaude, "web_search", "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"name\":\"web_search\"}}\n\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"web_search_tool_result\",\"content\":[{\"type\":\"web_search_result\",\"url\":\"https://go.dev\"}]}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n"},
@@ -72,6 +74,33 @@ func TestProtocolProbeNativeToolEvidence(t *testing.T) {
 	} {
 		t.Run(string(tc.format)+tc.check, func(t *testing.T) {
 			result := service.EvaluateProtocolProbe(tc.format, tc.check, 200, []byte(tc.body))
+			assert.Equal(t, "passed", result.Outcome)
+			assert.True(t, result.Terminal)
+			if tc.check != "tools" && tc.check != "namespaces" {
+				return
+			}
+			// Some thinking endpoints reject forced selection while supporting
+			// real tool calls with automatic selection. Probe that shared contract.
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				require.NoError(t, common.DecodeJson(r.Body, &body))
+				choice := body["tool_choice"]
+				if tc.format == types.RelayFormatClaude {
+					object, _ := choice.(map[string]any)
+					choice = object["type"]
+				}
+				if choice != "auto" {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			service.InitHttpClient()
+			upstream := model.Channel{Type: 1, Key: "fixture-key", BaseURL: common.GetPointer(server.URL)}
+			probe := model.ProtocolProbeCase{Model: "model", Check: tc.check, Endpoint: dto.ProtocolEndpoint{Format: tc.format, Path: "/v1/probe"}}
+			result = RunProtocolProbe(context.Background(), &upstream, probe, 256)
 			assert.Equal(t, "passed", result.Outcome)
 			assert.True(t, result.Terminal)
 		})

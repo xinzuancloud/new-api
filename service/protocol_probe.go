@@ -80,18 +80,18 @@ func BuildProtocolProbeFixture(format types.RelayFormat, modelName, check string
 		switch format {
 		case types.RelayFormatClaude:
 			body["tools"] = []any{map[string]any{"name": "newapi_probe", "description": "A diagnostic function. Do not execute.", "input_schema": schema}}
-			body["tool_choice"] = map[string]any{"type": "tool", "name": "newapi_probe"}
+			body["tool_choice"] = map[string]any{"type": "auto"}
 		case types.RelayFormatOpenAI:
 			body["tools"] = []any{map[string]any{"type": "function", "function": fn}}
-			body["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": "newapi_probe"}}
+			body["tool_choice"] = "auto"
 		case types.RelayFormatOpenAIResponses:
 			fn["type"] = "function"
 			if check == "namespaces" {
 				body["tools"] = []any{map[string]any{"type": "namespace", "name": "probe_namespace", "description": "Diagnostic tools", "tools": []any{fn}}}
-				body["tool_choice"] = "required"
+				body["tool_choice"] = "auto"
 			} else {
 				body["tools"] = []any{fn}
-				body["tool_choice"] = map[string]any{"type": "function", "name": "newapi_probe"}
+				body["tool_choice"] = "auto"
 			}
 		}
 	}
