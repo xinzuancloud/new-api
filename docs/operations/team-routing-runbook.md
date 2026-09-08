@@ -82,3 +82,11 @@ Plus 的 Kimi 订阅白名单是 `kimi-for-coding`、`kimi-k3-256k`。Plus 火�
 `context_management` 表示请求内的上下文编辑指令，不能一概视为依赖网关会话存储。`context_editing` 能力仅在已验证的原生 Messages/Responses 路径保留整个字段（包括空对象）；安全/严格跨协议转换仍拒绝丢弃它，原生 Chat 的 DTO 不支持该字段，所以即使误声明能力也拒绝。`previous_response_id`、conversation/container 引用和 background 仍不由第一阶段模拟。发现用户原生 Messages 被旧的全局 stateful 检查误拦后，曾暂时禁用协议路由恢复原行为，再应用修正。
 
 实测 SenseNova、火山现有 Base URL 下的 `/v1/messages` 也能原生接受上下文编辑请求；初始配置为这些渠道补充已验证 Messages 端点，避免不必要的 Messages→Chat 损耗。Kimi 的两个原生格式已验证，仍保留其自身思考/强制工具参数限制。
+
+### 能力检查失败的诊断
+
+`no verified protocol endpoint supports the request capabilities` 表示候选端点在请求发送前全部被能力检查排除，不是供应商返回的错误。诊断补丁会按端点协议列出 `missing capabilities`；没有已验证端点时明确返回 `no endpoints are verified`。输出只含已验证的协议标识和程序内的能力名，不含请求内容、工具描述、模型值或管理员端点路径。
+
+排查时关联客户端错误中的 request_id 与应用日志，再核对客户端所选模型及映射后的模型策略。区分配置遗漏、能力识别错误和上游确实不支持；只有实际核实支持后才在渠道 UI 的默认策略或模型覆盖中声明能力。不要直接勾选所有能力，也不要静默删除图片、工具或上下文以换取 HTTP 200。`hosted_tools` 指上游托管工具能力；它不证明请求一定开启了网页搜索，须继续核对实际工具类型。
+
+2026-09-08 16:30/16:31（UTC+8）的 Codex Desktop Windows `/v1/responses` 请求在旧的通用错误处被拦截。旧日志未保留能力明细，不能追溯确切缺失项；须用补丁后的客户端重试确认。诊断补丁本身不代表这个客户端的兼容性问题已经修复。
