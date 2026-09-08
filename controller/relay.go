@@ -248,6 +248,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = types.NewErrorWithStatusCode(err, types.ErrorCodeDoRequestFailed, http.StatusGatewayTimeout, types.ErrOptionWithSkipRetry())
 			break
 		}
+		service.ResetClaudeWebSearchBilling(c)
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, protocolPlan, channelErr := getProtocolChannel(c, relayInfo, retryParam)
 		if channelErr != nil {

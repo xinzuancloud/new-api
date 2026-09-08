@@ -145,6 +145,14 @@ func mergeToolSurchargeItems(items []ToolSurchargeItem) []ToolSurchargeItem {
 	return merged
 }
 
+// ResetClaudeWebSearchBilling prevents a failed upstream attempt from leaking
+// its search charges into a later attempt, including one using another format.
+func ResetClaudeWebSearchBilling(ctx *gin.Context) {
+	ctx.Set("claude_web_search_requests", 0)
+	ctx.Set("claude_web_search_usage_observed", false)
+	ctx.Set("claude_web_search_billing_state", nil)
+}
+
 func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, summary *textQuotaSummary) decimal.Decimal {
 	dGroupRatio := decimal.NewFromFloat(summary.GroupRatio)
 	dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
@@ -160,7 +168,8 @@ func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.Rel
 		}
 	}
 	if relayInfo.RelayMode != relayconstant.RelayModeResponses &&
-		strings.HasSuffix(summary.ModelName, "search-preview") {
+		strings.HasSuffix(summary.ModelName, "search-preview") &&
+		!ctx.GetBool("claude_web_search_usage_observed") && ctx.GetInt("claude_web_search_requests") == 0 {
 		items = collectToolSurchargeItem(items, dto.BuildInToolWebSearchPreview, 1, summary.ModelName)
 	}
 

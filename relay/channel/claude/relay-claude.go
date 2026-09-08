@@ -100,6 +100,7 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	if claudeResponse.Delta != nil && claudeResponse.Delta.StopReason != nil {
 		maybeMarkClaudeRefusal(c, *claudeResponse.Delta.StopReason)
 	}
+	observeClaudeWebSearchUsage(c, &claudeResponse)
 	if info.RelayFormat == types.RelayFormatClaude {
 		FormatClaudeResponseInfo(&claudeResponse, nil, claudeInfo)
 
@@ -223,11 +224,86 @@ func countClaudeStreamBillableTools(c *gin.Context, info *relaycommon.RelayInfo,
 		claudeResponse.ContentBlock.Type == "tool_use" {
 		info.CountBillableToolCall(dto.BuildInCallToolUse, claudeResponse.ContentBlock.Name)
 	}
-	if claudeResponse.Type == "message_delta" &&
-		claudeResponse.Usage != nil &&
-		claudeResponse.Usage.ServerToolUse != nil &&
-		claudeResponse.Usage.ServerToolUse.WebSearchRequests > 0 {
-		c.Set("claude_web_search_requests", claudeResponse.Usage.ServerToolUse.WebSearchRequests)
+}
+
+type claudeWebSearchResult struct {
+	id       string
+	billable bool
+}
+
+type claudeWebSearchBillingState struct {
+	pending   map[int]claudeWebSearchResult
+	completed map[string]struct{}
+	reported  *int
+	observed  bool
+}
+
+func billableClaudeWebSearchResult(block *dto.ClaudeMediaMessage) bool {
+	if strings.TrimSpace(block.ToolUseId) == "" || strings.TrimSpace(block.ErrorCode) != "" || (block.IsError != nil && *block.IsError) {
+		return false
+	}
+	results, ok := block.Content.([]any)
+	if !ok { // Error results are objects; successful results are arrays, including [].
+		return false
+	}
+	for _, result := range results {
+		item, ok := result.(map[string]any)
+		if !ok || item["type"] != "web_search_result" {
+			return false
+		}
+	}
+	return true
+}
+
+// Completed search results provide a fallback only when final server statistics
+// are absent. One result block is one invocation, regardless of its hit count.
+func observeClaudeWebSearchUsage(c *gin.Context, response *dto.ClaudeResponse) {
+	value, _ := c.Get("claude_web_search_billing_state")
+	state, _ := value.(*claudeWebSearchBillingState)
+	if state == nil {
+		state = &claudeWebSearchBillingState{pending: map[int]claudeWebSearchResult{}, completed: map[string]struct{}{}}
+		c.Set("claude_web_search_billing_state", state)
+	}
+	switch response.Type {
+	case "content_block_start":
+		if response.Index != nil {
+			delete(state.pending, *response.Index)
+			if response.ContentBlock != nil && response.ContentBlock.Type == "web_search_tool_result" {
+				state.pending[*response.Index] = claudeWebSearchResult{id: response.ContentBlock.ToolUseId, billable: billableClaudeWebSearchResult(response.ContentBlock)}
+			}
+		}
+	case "content_block_stop":
+		if response.Index != nil {
+			if result, ok := state.pending[*response.Index]; ok {
+				state.observed = true
+				if result.billable {
+					state.completed[result.id] = struct{}{}
+				}
+				delete(state.pending, *response.Index)
+			}
+		}
+	case "message":
+		for _, block := range response.Content {
+			if block.Type == "web_search_tool_result" {
+				state.observed = true
+				if billableClaudeWebSearchResult(&block) {
+					state.completed[block.ToolUseId] = struct{}{}
+				}
+			}
+		}
+	}
+	if (response.Type == "message" || response.Type == "message_delta") && response.Usage != nil && response.Usage.ServerToolUse != nil {
+		count := max(0, response.Usage.ServerToolUse.WebSearchRequests)
+		state.reported = &count
+		state.observed = true
+	}
+	if state.observed {
+		count := len(state.completed)
+		if state.reported != nil {
+			count = *state.reported
+		}
+		c.Set("claude_web_search_requests", count)
+		c.Set("claude_web_search_usage_observed", true)
 	}
 }
 
@@ -286,6 +362,7 @@ func finalizeClaudeStreamUsage(c *gin.Context, info *relaycommon.RelayInfo, clau
 }
 
 func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
+	service.ResetClaudeWebSearchBilling(c)
 	claudeInfo := &ClaudeResponseInfo{
 		ResponseId:   helper.GetResponseID(c),
 		Created:      common.GetTimestamp(),
@@ -327,6 +404,7 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 }
 
 func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo, httpResp *http.Response, data []byte) *types.NewAPIError {
+	service.ResetClaudeWebSearchBilling(c)
 	var claudeResponse dto.ClaudeResponse
 	err := common.Unmarshal(data, &claudeResponse)
 	if err != nil {
@@ -397,9 +475,7 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		}
 	}
 
-	if claudeResponse.Usage != nil && claudeResponse.Usage.ServerToolUse != nil && claudeResponse.Usage.ServerToolUse.WebSearchRequests > 0 {
-		c.Set("claude_web_search_requests", claudeResponse.Usage.ServerToolUse.WebSearchRequests)
-	}
+	observeClaudeWebSearchUsage(c, &claudeResponse)
 
 	for _, block := range claudeResponse.Content {
 		if block.Type == "tool_use" {

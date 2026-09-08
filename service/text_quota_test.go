@@ -960,6 +960,17 @@ func TestCalculateTextToolCallSurchargeKeepsSearchPreviewFallbackWithCustomFunct
 	expected := decimal.NewFromFloat((5.0 + 25.0) / 1000).
 		Mul(decimal.NewFromFloat(common.QuotaPerUnit))
 	assert.True(t, expected.Equal(surcharge), "got %s want %s", surcharge, expected)
+	for _, count := range []int{0, 2} {
+		ctx.Set("claude_web_search_requests", count)
+		ctx.Set("claude_web_search_usage_observed", true)
+		summary = &textQuotaSummary{ModelName: relayInfo.OriginModelName, GroupRatio: 1}
+		surcharge = calculateTextToolCallSurcharge(ctx, relayInfo, summary)
+		for _, item := range summary.ToolSurchargeItems {
+			assert.NotEqual(t, dto.BuildInToolWebSearchPreview, item.Name, "observed searches replace the implicit search assumption")
+		}
+		expected = decimal.NewFromFloat((5.0 + 10.0*float64(count)) / 1000).Mul(decimal.NewFromFloat(common.QuotaPerUnit))
+		assert.True(t, expected.Equal(surcharge), "count %d: got %s want %s", count, surcharge, expected)
+	}
 }
 
 func TestCalculateTextToolCallSurchargeDoesNotInferSearchForResponses(t *testing.T) {
