@@ -2,6 +2,7 @@ package router
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
@@ -29,6 +30,10 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 	)
 
 	for _, route := range channelPermissionRoutes {
+		if strings.HasPrefix(route.path, "/protocol/") && route.method != http.MethodGet {
+			channelRoute.Handle(route.method, route.path, middleware.RequirePermission(route.permission), middleware.SessionCookieOriginGuard(), middleware.CriticalRateLimit(), route.handler)
+			continue
+		}
 		channelRoute.Handle(route.method, route.path,
 			middleware.RequirePermission(route.permission),
 			route.handler,
@@ -37,6 +42,17 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 }
 
 var channelPermissionRoutes = []permissionRoute{
+	{method: http.MethodPost, path: "/protocol/probes", permission: authz.ChannelOperate, handler: controller.CreateProtocolProbe},
+	{method: http.MethodGet, path: "/protocol/probes", permission: authz.ChannelRead, handler: controller.GetProtocolProbes},
+	{method: http.MethodGet, path: "/protocol/probes/:id", permission: authz.ChannelRead, handler: controller.GetProtocolProbe},
+	{method: http.MethodPost, path: "/protocol/probes/:id/run", permission: authz.ChannelOperate, handler: controller.RunProtocolProbe},
+	{method: http.MethodPost, path: "/protocol/probes/:id/cancel", permission: authz.ChannelOperate, handler: controller.CancelProtocolProbe},
+	{method: http.MethodPost, path: "/protocol/probes/:id/apply", permission: authz.ChannelWrite, handler: controller.ApplyProtocolProbe},
+
+	{method: http.MethodGet, path: "/protocol/profiles", permission: authz.ChannelRead, handler: controller.GetProtocolProfiles},
+	{method: http.MethodPut, path: "/protocol/profiles", permission: authz.ChannelWrite, handler: controller.PutProtocolProfiles},
+	{method: http.MethodPost, path: "/protocol/bind", permission: authz.ChannelWrite, handler: controller.BindProtocolProfiles},
+	{method: http.MethodGet, path: "/protocol/effective/:id", permission: authz.ChannelRead, handler: controller.GetEffectiveProtocolProfile},
 	{method: http.MethodGet, path: "/", permission: authz.ChannelRead, handler: controller.GetAllChannels},
 	{method: http.MethodGet, path: "/search", permission: authz.ChannelRead, handler: controller.SearchChannels},
 	{method: http.MethodGet, path: "/models", permission: authz.ChannelRead, handler: controller.ChannelListModels},

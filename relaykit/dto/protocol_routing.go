@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -12,8 +13,10 @@ import (
 )
 
 // ProtocolRoutingSettings declares administrator-verified endpoints on this
-// channel's existing upstream host. Model policies replace defaults completely.
+// channel's existing upstream host. Complete policies replace inherited policies;
+// partial policies declare only differences.
 type ProtocolRoutingSettings struct {
+	Profile         string                         `json:"profile,omitempty"`
 	Enabled         bool                           `json:"enabled"`
 	AccountResource string                         `json:"account_resource,omitempty"`
 	QuotaScope      string                         `json:"quota_scope,omitempty"`
@@ -22,9 +25,18 @@ type ProtocolRoutingSettings struct {
 }
 
 type ProtocolModelPolicy struct {
-	EntryFormats []types.RelayFormat `json:"entry_formats"`
-	Endpoints    []ProtocolEndpoint  `json:"endpoints"`
-	LossPolicy   string              `json:"loss_policy,omitempty"`
+	EndpointOverrides []ProtocolEndpointOverride `json:"endpoint_overrides,omitempty"`
+	EntryFormats      []types.RelayFormat        `json:"entry_formats"`
+	Endpoints         []ProtocolEndpoint         `json:"endpoints"`
+	LossPolicy        string                     `json:"loss_policy,omitempty"`
+}
+
+type ProtocolEndpointOverride struct {
+	Format     types.RelayFormat `json:"format"`
+	Path       string            `json:"path,omitempty"`
+	Features   map[string]bool   `json:"features,omitempty"`
+	Verified   *bool             `json:"verified,omitempty"`
+	VerifiedAt *string           `json:"verified_at,omitempty"`
 }
 
 type ProtocolEndpoint struct {
@@ -48,6 +60,15 @@ func (s *ProtocolRoutingSettings) Validate() error {
 	if len(s.Models) > 256 {
 		return fmt.Errorf("protocol_routing supports at most 256 model overrides")
 	}
+	if !ValidProtocolProfileID(s.Profile) && s.Profile != "" {
+		return fmt.Errorf("invalid protocol profile identifier")
+	}
+	if s.Profile != "" {
+		return nil
+	}
+	if len(s.Defaults.EndpointOverrides) > 0 {
+		return fmt.Errorf("endpoint_overrides in defaults require a profile")
+	}
 	if s.Enabled || len(s.Defaults.EntryFormats) > 0 || len(s.Defaults.Endpoints) > 0 || s.Defaults.LossPolicy != "" {
 		if err := s.Defaults.Validate(); err != nil {
 			return fmt.Errorf("protocol_routing.defaults: %w", err)
@@ -57,7 +78,7 @@ func (s *ProtocolRoutingSettings) Validate() error {
 		if len(name) == 0 || len(name) > 256 || strings.TrimSpace(name) != name || strings.IndexFunc(name, unicode.IsControl) >= 0 {
 			return fmt.Errorf("protocol_routing model identifier is invalid")
 		}
-		if err := policy.Validate(); err != nil {
+		if _, err := s.Defaults.Merge(policy); err != nil {
 			return fmt.Errorf("protocol_routing model override: %w", err)
 		}
 	}
@@ -123,4 +144,99 @@ func (p ProtocolModelPolicy) Validate() error {
 
 func IsProtocolRoutingFormat(format types.RelayFormat) bool {
 	return format == types.RelayFormatOpenAI || format == types.RelayFormatClaude || format == types.RelayFormatOpenAIResponses
+}
+
+// ValidProtocolProfileID accepts stable, nonsecret catalog identifiers.
+func ValidProtocolProfileID(id string) bool {
+	if len(id) == 0 || len(id) > 64 {
+		return false
+	}
+	for _, c := range id {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// Merge preserves legacy replacement for complete policies and inherits omitted
+// fields of partial policies. Returned endpoint slices never alias either input.
+func (p ProtocolModelPolicy) Merge(override ProtocolModelPolicy) (ProtocolModelPolicy, error) {
+	if len(override.EntryFormats) > 0 && len(override.Endpoints) > 0 {
+		p = ProtocolModelPolicy{EntryFormats: override.EntryFormats, Endpoints: override.Endpoints, LossPolicy: override.LossPolicy}
+	} else {
+		if override.EntryFormats != nil {
+			p.EntryFormats = override.EntryFormats
+		}
+		if override.Endpoints != nil {
+			p.Endpoints = override.Endpoints
+		}
+		if override.LossPolicy != "" {
+			p.LossPolicy = override.LossPolicy
+		}
+	}
+	p.EntryFormats = append([]types.RelayFormat(nil), p.EntryFormats...)
+	endpoints := make([]ProtocolEndpoint, len(p.Endpoints))
+	copy(endpoints, p.Endpoints)
+	p.Endpoints = endpoints
+	for i := range p.Endpoints {
+		p.Endpoints[i].Features = append([]string(nil), p.Endpoints[i].Features...)
+	}
+	if len(override.EndpointOverrides) > 16 {
+		return p, fmt.Errorf("too many endpoint overrides")
+	}
+	seen := map[int]bool{}
+	for _, change := range override.EndpointOverrides {
+		index := -1
+		for i, endpoint := range p.Endpoints {
+			if endpoint.Format == change.Format && (change.Path == "" || endpoint.Path == change.Path) {
+				if index != -1 {
+					return p, fmt.Errorf("ambiguous endpoint override")
+				}
+				index = i
+			}
+		}
+		if index < 0 || seen[index] {
+			return p, fmt.Errorf("dangling or duplicate endpoint override")
+		}
+		seen[index] = true
+		endpoint := &p.Endpoints[index]
+		if change.Features != nil {
+			features := map[string]bool{}
+			for _, feature := range endpoint.Features {
+				features[feature] = true
+			}
+			for feature, enabled := range change.Features {
+				if !validProtocolFeature(feature) {
+					return p, fmt.Errorf("endpoint feature is invalid")
+				}
+				if enabled {
+					features[feature] = true
+				} else {
+					delete(features, feature)
+				}
+			}
+			endpoint.Features = nil
+			for feature := range features {
+				endpoint.Features = append(endpoint.Features, feature)
+			}
+			sort.Strings(endpoint.Features)
+		}
+		if change.Verified != nil {
+			endpoint.Verified = *change.Verified
+		}
+		if change.VerifiedAt != nil {
+			endpoint.VerifiedAt = *change.VerifiedAt
+		}
+	}
+	p.EndpointOverrides = nil
+	return p, p.Validate()
+}
+
+func validProtocolFeature(feature string) bool {
+	switch feature {
+	case "stream", "tools", "parallel_tools", "images", "files", "audio", "video", "structured_output", "reasoning", "hosted_tools", "context_editing", "stateful", "background":
+		return true
+	}
+	return false
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
+	"github.com/QuantumNous/new-api/setting/protocol_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
@@ -80,6 +81,9 @@ func PrepareProtocolRequest(c *gin.Context, info *relaycommon.RelayInfo) (*Prepa
 	}
 	if err = helper.ApplyReasoningModelSuffix(c, info, request); err != nil {
 		return nil, newConvertRequestFailedError(c, info, err)
+	}
+	if err = protocol_setting.Get().ValidateProduct(policy, info.ChannelType, info.ChannelBaseUrl); err != nil {
+		return capabilityError(err.Error())
 	}
 	source["model"] = info.UpstreamModelName
 	candidates, err := service.BuildProtocolCandidates(policy, info.UpstreamModelName, info.RelayFormat, source)

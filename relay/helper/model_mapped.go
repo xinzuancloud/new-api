@@ -1,7 +1,6 @@
 package helper
 
 import (
-	"errors"
 	"fmt"
 
 	rootcommon "github.com/QuantumNous/new-api/common"
@@ -25,38 +24,12 @@ func ModelMappedHelper(c *gin.Context, info *relaycommon.RelayInfo, request dto.
 			return fmt.Errorf("unmarshal_model_mapping_failed")
 		}
 
-		// 支持链式模型重定向，最终使用链尾的模型
-		currentModel := info.OriginModelName
-		visitedModels := map[string]bool{
-			currentModel: true,
+		currentModel, mapped, err := hostreasoning.ResolveModelMapping(modelMap, info.OriginModelName)
+		if err != nil {
+			return err
 		}
-		for {
-			mappedModel, exists := modelMap[currentModel]
-			baseModel := hostreasoning.BaseModelName(currentModel)
-			if (!exists || mappedModel == "") && baseModel != currentModel {
-				mappedModel, exists = modelMap[baseModel]
-			}
-			if exists && mappedModel != "" {
-				// 模型重定向循环检测，避免无限循环
-				if visitedModels[mappedModel] {
-					if mappedModel == currentModel {
-						if currentModel == info.OriginModelName {
-							info.IsModelMapped = false
-							return nil
-						}
+		info.IsModelMapped = mapped
 
-						info.IsModelMapped = true
-						break
-					}
-					return errors.New("model_mapping_contains_cycle")
-				}
-				visitedModels[mappedModel] = true
-				currentModel = mappedModel
-				info.IsModelMapped = true
-			} else {
-				break
-			}
-		}
 		if info.IsModelMapped {
 			info.UpstreamModelName = currentModel
 		}

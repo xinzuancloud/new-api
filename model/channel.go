@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/protocol_setting"
 
 	"github.com/samber/lo"
 	"gorm.io/gorm"
@@ -348,7 +349,16 @@ func (channel *Channel) GetAutoBan() bool {
 }
 
 func (channel *Channel) Save() error {
-	return DB.Save(channel).Error
+	return DB.Transaction(func(tx *gorm.DB) error {
+		catalog, e := LockProtocolProfilesForProbe(tx)
+		if e != nil {
+			return e
+		}
+		if e = validateProtocolChannel(catalog, channel); e != nil {
+			return e
+		}
+		return tx.Save(channel).Error
+	})
 }
 
 // saveStatusState persists only the fields owned by the channel status flow.
@@ -461,6 +471,17 @@ func BatchInsertChannels(channels []Channel) error {
 		}
 	}()
 
+	catalog, err := protocolCatalogForChannelInsert(tx, channels)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	for i := range channels {
+		if err = validateProtocolChannel(catalog, &channels[i]); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
 	for _, chunk := range lo.Chunk(channels, 50) {
 		if err := tx.Create(&chunk).Error; err != nil {
 			tx.Rollback()
@@ -544,13 +565,19 @@ func (channel *Channel) GetStatusCodeMapping() string {
 }
 
 func (channel *Channel) Insert() error {
-	var err error
-	err = DB.Create(channel).Error
-	if err != nil {
-		return err
-	}
-	err = channel.AddAbilities(nil)
-	return err
+	return DB.Transaction(func(tx *gorm.DB) error {
+		catalog, e := protocolCatalogForChannelInsert(tx, []Channel{*channel})
+		if e != nil {
+			return e
+		}
+		if e = validateProtocolChannel(catalog, channel); e != nil {
+			return e
+		}
+		if e = tx.Create(channel).Error; e != nil {
+			return e
+		}
+		return channel.AddAbilities(tx)
+	})
 }
 
 func (channel *Channel) Update() error {
@@ -592,14 +619,22 @@ func (channel *Channel) Update() error {
 			}
 		}
 	}
-	var err error
-	err = DB.Model(channel).Updates(channel).Error
-	if err != nil {
-		return err
-	}
-	DB.Model(channel).First(channel, "id = ?", channel.Id)
-	err = channel.UpdateAbilities(nil)
-	return err
+	return DB.Transaction(func(tx *gorm.DB) error {
+		catalog, e := LockProtocolProfilesForProbe(tx)
+		if e != nil {
+			return e
+		}
+		if e = tx.Model(channel).Updates(channel).Error; e != nil {
+			return e
+		}
+		if e = tx.First(channel, "id = ?", channel.Id).Error; e != nil {
+			return e
+		}
+		if e = validateProtocolChannel(catalog, channel); e != nil {
+			return e
+		}
+		return channel.UpdateAbilities(tx)
+	})
 }
 
 func (channel *Channel) UpdateResponseTime(responseTime int64) {
@@ -982,7 +1017,7 @@ func (channel *Channel) ValidateSettings() error {
 	if err := channelParams.ValidateHTTPTransport(); err != nil {
 		return err
 	}
-	if err := channelParams.ProtocolRouting.Validate(); err != nil {
+	if err := protocol_setting.Get().ValidateChannel(channelParams.ProtocolRouting, channel.Type, channel.GetBaseURL()); err != nil {
 		return err
 	}
 	if channelParams.ProtocolRouting != nil && channelParams.ProtocolRouting.Enabled && !common.SupportsProtocolRoutingChannelType(channel.Type) {

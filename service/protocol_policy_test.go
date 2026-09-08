@@ -275,3 +275,21 @@ func TestProtocolStatefulErrorsNameFieldsWithoutValues(t *testing.T) {
 		}
 	}
 }
+
+func TestProtocolClientToolFamilies(t *testing.T) {
+	endpoint := dto.ProtocolEndpoint{Format: types.RelayFormatClaude, Path: "/v1/messages", Verified: true, Features: []string{"tools"}}
+	for _, kind := range []string{"bash_20250124", "text_editor_20250728", "computer_20251124", "memory_20250818", "computer_toolset_20260801", "browser_toolset_20260801", "apply_patch", "local_shell"} {
+		request := map[string]any{"tools": []any{map[string]any{"type": kind}}}
+		require.NoError(t, ValidateProtocolEndpointFeatures(endpoint, endpoint.Format, request), kind)
+	}
+	for _, kind := range []string{"future_private_tool", "web_search_20250305"} {
+		err := ValidateProtocolEndpointFeatures(endpoint, endpoint.Format, map[string]any{"tools": []any{map[string]any{"type": kind}}})
+		require.Error(t, err)
+		if kind == "future_private_tool" {
+			assert.Contains(t, err.Error(), "unknown_tool_execution")
+			assert.NotContains(t, err.Error(), kind)
+		} else {
+			assert.Contains(t, err.Error(), "hosted_tools")
+		}
+	}
+}

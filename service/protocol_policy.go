@@ -8,6 +8,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/protocol_setting"
 )
 
 type ProtocolCandidate struct {
@@ -25,9 +26,9 @@ func BuildProtocolCandidates(settings *dto.ProtocolRoutingSettings, upstreamMode
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
-	policy := settings.Defaults
-	if override, ok := settings.Models[upstreamModel]; ok {
-		policy = override
+	policy, err := protocol_setting.Get().Resolve(settings, upstreamModel)
+	if err != nil {
+		return nil, err
 	}
 	allowed := false
 	for _, format := range policy.EntryFormats {
@@ -224,8 +225,15 @@ func inspectProtocolTools(value any, required map[string]bool, depth int) {
 			// require provider-hosted execution. Inspect its declarations only,
 			// keeping schemas, arguments and descriptions opaque.
 			inspectProtocolTools(spec["tools"], required, depth+1)
-		} else if kind != "" && kind != "function" && kind != "custom" {
+		}
+		switch ClassifyProtocolTool(spec) {
+		case "server":
 			required["hosted_tools"] = true
+		case "unknown":
+			required["unknown_tool_execution"] = true
+		}
+		if environment, ok := spec["environment"].(map[string]any); ok && environment["type"] == "container_reference" {
+			required["stateful"] = true
 		}
 		if container, exists := spec["container"]; exists && protocolValuePresent(container) {
 			fresh, ok := container.(map[string]any)
@@ -277,8 +285,16 @@ func inspectProtocolContent(value any, required map[string]bool, depth int) {
 			required["audio"] = true
 		case "video", "video_url", "input_video":
 			required["video"] = true
-		case "tool_use", "tool_result", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output":
+		case "tool_use", "tool_result", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "computer_call", "computer_call_output", "local_shell_call", "local_shell_call_output", "apply_patch_call", "apply_patch_call_output":
 			required["tools"] = true
+		case "tool_search_call", "tool_search_output":
+			required["tools"] = true
+			if v["execution"] != "client" {
+				required["hosted_tools"] = true
+			}
+		case "shell_call", "shell_call_output":
+			required["tools"] = true
+			required["unknown_tool_execution"] = true
 		case "thinking", "redacted_thinking", "reasoning":
 			required["reasoning"] = true
 		case "item_reference":
