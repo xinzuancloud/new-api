@@ -18,10 +18,17 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen } from '@testing-library/react'
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useForm } from 'react-hook-form'
-import { describe, expect, test, vi } from 'vitest'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { Button } from '@/components/ui/button'
 import { Form } from '@/components/ui/form'
@@ -32,10 +39,12 @@ import {
   buildSettingJSON,
   type ChannelFormValues,
 } from '../../../../lib/channel-form'
+import { protocolProfilesAPI } from '../../../../lib/protocol-profiles-api'
 import { ChannelProtocolRoutingSection } from '../channel-protocol-routing-section'
 
 vi.mock('../../../../lib/protocol-profiles-api', () => ({
   protocolProfilesAPI: {
+    effective: vi.fn(),
     catalog: vi
       .fn()
       .mockResolvedValue({ revision: '1', profiles: {}, channels: [] }),
@@ -44,6 +53,9 @@ vi.mock('../../../../lib/protocol-profiles-api', () => ({
 
 function Editor(props: {
   disabled?: boolean
+  channelId?: number
+  client?: QueryClient
+  values?: Partial<ChannelFormValues>
   onSave?: (value: string) => void
 }) {
   const form = useForm<ChannelFormValues>({
@@ -52,11 +64,13 @@ function Editor(props: {
       ...CHANNEL_FORM_DEFAULT_VALUES,
       name: 'Channel',
       models: 'model',
+      ...props.values,
     },
   })
   return (
     <QueryClientProvider
       client={
+        props.client ??
         new QueryClient({ defaultOptions: { queries: { retry: false } } })
       }
     >
@@ -68,6 +82,7 @@ function Editor(props: {
         >
           <ChannelProtocolRoutingSection
             form={form}
+            channelId={props.channelId}
             disabled={props.disabled}
           />
           <Button type='submit'>Save</Button>
@@ -134,3 +149,113 @@ describe('channel protocol routing editor', () => {
     expect(toggle).toHaveAttribute('aria-checked', 'false')
   })
 })
+
+beforeEach(() => {
+  vi.mocked(protocolProfilesAPI.effective).mockReset()
+})
+
+const effectiveA: Awaited<ReturnType<typeof protocolProfilesAPI.effective>> = {
+  revision: 'r1',
+  profile: 'shared',
+  settings: {
+    enabled: true,
+    defaults: {
+      entry_formats: ['openai'],
+      endpoints: [
+        { format: 'openai', path: '/v1/chat/completions', verified: false },
+      ],
+      loss_policy: 'safe',
+    },
+  },
+}
+
+test.each(['success', 'failure'] as const)(
+  'detaching with cached policy awaits a fresh saved policy: %s',
+  async (outcome) => {
+    const user = userEvent.setup()
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, staleTime: 10000 },
+        mutations: { retry: false },
+      },
+    })
+    client.setQueryData(['protocol-profiles', 'effective', 1], effectiveA)
+    let resolve!: (
+      value: Awaited<ReturnType<typeof protocolProfilesAPI.effective>>
+    ) => void
+    let reject!: (error: Error) => void
+    vi.mocked(protocolProfilesAPI.effective).mockReturnValue(
+      new Promise((yes, no) => {
+        resolve = yes
+        reject = no
+      })
+    )
+    const onSave = vi.fn()
+    const view = render(
+      <Editor
+        channelId={1}
+        client={client}
+        onSave={onSave}
+        values={{
+          protocol_routing_enabled: true,
+          protocol_routing_profile: 'shared',
+          protocol_routing_defaults: '{}',
+          protocol_routing_models: '{}',
+        }}
+      />
+    )
+    await waitFor(() =>
+      expect(
+        screen.getByRole('combobox', { name: 'Shared protocol profile' })
+      ).not.toHaveAttribute('aria-disabled', 'true')
+    )
+    await user.click(
+      screen.getByRole('combobox', { name: 'Shared protocol profile' })
+    )
+    await user.click(
+      await screen.findByRole('option', { name: 'Local configuration' })
+    )
+    const confirm = await screen.findByRole('button', { name: 'Continue' })
+    expect(confirm).toBeDisabled()
+    await act(async () => {
+      if (outcome === 'success') {
+        resolve({
+          ...effectiveA,
+          settings: {
+            ...effectiveA.settings,
+            defaults: {
+              ...effectiveA.settings.defaults,
+              loss_policy: 'strict',
+            },
+          },
+        })
+      } else {
+        reject(new Error('refresh failed'))
+      }
+    })
+    if (outcome === 'success') {
+      await waitFor(() => expect(confirm).toBeEnabled())
+      await user.click(confirm)
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+      await waitFor(() => expect(onSave).toHaveBeenCalled())
+      const saved = JSON.parse(onSave.mock.calls[0][0]).protocol_routing
+      expect(saved.profile).toBeUndefined()
+      expect(saved.defaults.loss_policy).toBe('strict')
+    } else {
+      expect(
+        await within(screen.getByRole('alertdialog')).findByText(
+          'Something went wrong!'
+        )
+      ).toBeVisible()
+      expect(confirm).toBeDisabled()
+      await user.click(screen.getByRole('button', { name: 'Cancel' }))
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+      await waitFor(() => expect(onSave).toHaveBeenCalled())
+      expect(JSON.parse(onSave.mock.calls[0][0]).protocol_routing.profile).toBe(
+        'shared'
+      )
+    }
+    view.unmount()
+    client.clear()
+  }
+)

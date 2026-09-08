@@ -102,8 +102,9 @@ export const protocolModelPolicySchema = completeProtocolModelPolicySchema
               .optional(),
             verified: z.boolean().optional(),
             verified_at:
-              completeProtocolModelPolicySchema.shape.endpoints.element.shape
-                .verified_at,
+              completeProtocolModelPolicySchema.shape.endpoints.element.shape.verified_at.or(
+                z.literal('')
+              ),
           })
           .strict()
       )

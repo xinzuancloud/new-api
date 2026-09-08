@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useWatch, type UseFormReturn } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -57,18 +57,22 @@ export function ChannelProfileField(props: {
     enabled: Boolean(props.channelId),
     refetchOnWindowFocus: false,
   })
+  const detach = useMutation({
+    mutationFn: async () => {
+      const refreshed = await effective.refetch({ throwOnError: true })
+      return refreshed.data
+    },
+  })
   const change = (value: string) => {
     setError('')
     if (value === profile) return
-    if (
-      !value &&
-      profile &&
-      (!effective.data || effective.data.profile !== profile)
-    ) {
+    if (!value && profile && !props.channelId) {
       setError(t('Save the channel before detaching a newly selected profile.'))
       return
     }
+    detach.reset()
     setNext(value)
+    if (!value) detach.mutate()
   }
   return (
     <div className='space-y-3'>
@@ -117,6 +121,13 @@ export function ChannelProfileField(props: {
               )
         }
         confirmText={t('Continue')}
+        disabled={
+          props.disabled ||
+          (next === '' &&
+            (!detach.isSuccess ||
+              !detach.data ||
+              detach.data.profile !== profile))
+        }
         handleConfirm={() => {
           if (next === null) return
           if (next) {
@@ -126,15 +137,22 @@ export function ChannelProfileField(props: {
             props.form.setValue('protocol_routing_models', '{}', {
               shouldDirty: true,
             })
-          } else if (effective.data) {
+          } else {
+            if (
+              !detach.isSuccess ||
+              !detach.data ||
+              detach.data.profile !== profile
+            ) {
+              return
+            }
             props.form.setValue(
               'protocol_routing_defaults',
-              JSON.stringify(effective.data.settings.defaults, null, 2),
+              JSON.stringify(detach.data.settings.defaults, null, 2),
               { shouldDirty: true }
             )
             props.form.setValue(
               'protocol_routing_models',
-              JSON.stringify(effective.data.settings.models || {}, null, 2),
+              JSON.stringify(detach.data.settings.models || {}, null, 2),
               { shouldDirty: true }
             )
           }
@@ -144,7 +162,24 @@ export function ChannelProfileField(props: {
           })
           setNext(null)
         }}
-      />
+      >
+        {next === '' && detach.isPending && <LoadingState inline />}
+        {next === '' && detach.error && (
+          <ErrorState
+            description={t(
+              getServerErrorMessageKey(detach.error) || 'Something went wrong!'
+            )}
+            onRetry={() => detach.mutate()}
+          />
+        )}
+        {next === '' &&
+          detach.isSuccess &&
+          detach.data?.profile !== profile && (
+            <p role='alert' className='text-destructive text-sm'>
+              {t('Save the channel before detaching a newly selected profile.')}
+            </p>
+          )}
+      </ConfirmDialog>
       {props.channelId && (
         <details>
           <summary className='cursor-pointer text-sm'>

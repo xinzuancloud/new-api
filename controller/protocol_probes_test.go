@@ -85,11 +85,20 @@ func TestProtocolProbeWorkflow(t *testing.T) {
 	require.NoError(t, err)
 	channel := model.Channel{Name: "account", Type: 1, Key: "fixture-key", Status: common.ChannelStatusEnabled, Models: "public", Group: "default", UsedQuota: 91, BaseURL: common.GetPointer(server.URL), ModelMapping: common.GetPointer(`{"public":"alias","alias":"wire"}`), Setting: common.GetPointer(`{"protocol_routing":{"profile":"vendor","enabled":true,"account_resource":"account"}}`)}
 	require.NoError(t, channel.Insert())
+	legacy := model.Channel{Name: "legacy", Type: 1, Status: common.ChannelStatusEnabled, Setting: common.GetPointer("broken")}
+	require.NoError(t, db.Create(&legacy).Error)
 	request := protocolProbePlanRequest{Profile: "vendor", Checks: []string{"text", "tools"}}
+	_, err = planProtocolProbes(protocolProbePlanRequest{Profile: "vendor", ChannelIDs: []int{legacy.Id}, Checks: []string{"text"}})
+	require.EqualError(t, err, "invalid_channel_settings")
+	require.NoError(t, db.Model(&legacy).Update("setting", `{"protocol_routing":{"profile":"vendor","enabled":"invalid"}}`).Error)
+	_, err = planProtocolProbes(request)
+	require.EqualError(t, err, "invalid_channel_settings", "an identifiable binding must still receive strict validation")
+	require.NoError(t, db.Model(&legacy).Update("setting", "broken").Error)
 	report, err := planProtocolProbes(request)
 	require.NoError(t, err)
 	require.Len(t, report.Cases, 2)
 	assert.Equal(t, "wire", report.Cases[0].Model)
+	assert.Equal(t, channel.Id, report.Cases[0].ChannelID)
 	require.NoError(t, model.CreateProtocolProbeReport(report))
 	stored, err := model.ReadProtocolProbeReport(nil, report.ID, false)
 	require.NoError(t, err)

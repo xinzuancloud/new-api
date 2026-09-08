@@ -111,6 +111,18 @@ func planProtocolProbes(request protocolProbePlanRequest) (*model.ProtocolProbeR
 	seen := map[string]bool{}
 	foundModels := map[string]bool{}
 	for _, ch := range channels {
+		if len(request.ChannelIDs) == 0 {
+			// As in catalog administration, unparseable legacy settings cannot
+			// supply a binding. Identifiable references still require full validation.
+			var reference struct {
+				Routing *struct {
+					Profile string `json:"profile"`
+				} `json:"protocol_routing"`
+			}
+			if ch.Setting == nil || common.UnmarshalJsonStr(*ch.Setting, &reference) != nil || reference.Routing == nil || reference.Routing.Profile != request.Profile {
+				continue
+			}
+		}
 		settings, err := model.ProtocolChannelSettings(&ch)
 		if err != nil {
 			return nil, err

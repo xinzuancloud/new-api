@@ -25,6 +25,7 @@ import {
   channelFormSchema,
   transformChannelToFormDefaults,
 } from '../channel-form'
+import { protocolCatalogSchema } from '../protocol-profiles-api'
 import { protocolModelPolicySchema } from '../protocol-routing'
 
 const policy = {
@@ -296,3 +297,38 @@ test('inline defaults require a complete base and can include endpoint differenc
       .success
   ).toBe(false)
 })
+
+test('channel and catalog overrides preserve explicit verification timestamp clearing', () => {
+  const difference = {
+    endpoint_overrides: [
+      { format: 'openai', verified: false, verified_at: '' },
+    ],
+  }
+  const values = {
+    ...form,
+    protocol_routing_enabled: true,
+    protocol_routing_profile: 'shared',
+    protocol_routing_defaults: JSON.stringify(difference),
+    protocol_routing_models: JSON.stringify({ model: difference }),
+  }
+  const parsed = channelFormSchema.parse(values)
+  const saved = JSON.parse(buildSettingJSON(parsed)).protocol_routing
+  expect(saved.defaults).toEqual(difference)
+  expect(saved.models.model).toEqual(difference)
+  const catalog = {
+    shared: { name: 'Shared', defaults: policy, models: { model: difference } },
+  }
+  const serialized = JSON.stringify(protocolCatalogSchema.parse(catalog))
+  expect(JSON.parse(serialized)).toEqual(catalog)
+})
+
+test.each(['yesterday', '2026-09-08T12:00Z'])(
+  'nonempty override verification timestamp %s must be RFC3339 with seconds',
+  (verified_at) => {
+    expect(
+      protocolModelPolicySchema.safeParse({
+        endpoint_overrides: [{ format: 'openai', verified_at }],
+      }).success
+    ).toBe(false)
+  }
+)

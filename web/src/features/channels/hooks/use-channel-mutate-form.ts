@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -82,6 +82,7 @@ function getErrorMessage(error: unknown): string | undefined {
 
 export function useChannelMutateForm(props: UseChannelMutateFormParams) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const currentUser = useAuthStore((s) => s.auth.user)
   const canEditSensitive = hasPermission(
     currentUser,
@@ -133,6 +134,7 @@ export function useChannelMutateForm(props: UseChannelMutateFormParams) {
       return SUCCESS_MESSAGES.CREATED
     },
     onSuccess: (messageKey) => {
+      void queryClient.invalidateQueries({ queryKey: ['protocol-profiles'] })
       toast.success(t(messageKey))
       props.onSuccess()
     },

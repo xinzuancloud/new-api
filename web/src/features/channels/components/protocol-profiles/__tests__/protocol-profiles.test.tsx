@@ -26,14 +26,19 @@ import {
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ReactNode } from 'react'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
+import { api } from '@/lib/api'
+
+import { useChannelMutateForm } from '../../../hooks/use-channel-mutate-form'
 import { useProtocolProbes } from '../../../hooks/use-protocol-probes'
+import { CHANNEL_FORM_DEFAULT_VALUES } from '../../../lib/channel-form'
 import {
   protocolProfilesAPI,
   type ProbeReport,
   type ProfilesResponse,
 } from '../../../lib/protocol-profiles-api'
+import { channelSchema } from '../../../types'
 import { ProfileBinding } from '../profile-binding'
 import { ProfileProbes } from '../profile-probes'
 
@@ -261,4 +266,64 @@ describe('profile binding preview', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
     expect(protocolProfilesAPI.bind).toHaveBeenCalledTimes(1)
   })
+})
+
+afterEach(() => vi.restoreAllMocks())
+
+test('ordinary channel save refreshes protocol catalog and effective policy queries', async () => {
+  vi.spyOn(api, 'put').mockResolvedValue({ data: { success: true } })
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { staleTime: Infinity },
+      mutations: { retry: false },
+    },
+  })
+  client.setQueryData(['protocol-profiles', 'catalog'], catalog)
+  client.setQueryData(['protocol-profiles', 'effective', 1], {
+    revision: 'r1',
+    profile: 'shared',
+    settings: { enabled: true, defaults: {} },
+  })
+  const currentRow = channelSchema.parse({
+    id: 1,
+    name: 'Account 1',
+    type: 1,
+    key: '',
+    status: 1,
+    created_time: 0,
+    test_time: 0,
+    response_time: 0,
+    balance_updated_time: 0,
+  })
+  const hook = renderHook(
+    () =>
+      useChannelMutateForm({
+        currentRow,
+        isEditing: true,
+        isMultiKeyChannel: false,
+        onSuccess: () => {},
+      }),
+    {
+      wrapper: (props) => (
+        <QueryClientProvider client={client}>
+          {props.children}
+        </QueryClientProvider>
+      ),
+    }
+  )
+  await act(async () => {
+    await hook.result.current.mutateAsync({
+      ...CHANNEL_FORM_DEFAULT_VALUES,
+      name: 'Renamed',
+      models: 'model',
+    })
+  })
+  expect(
+    client.getQueryState(['protocol-profiles', 'catalog'])?.isInvalidated
+  ).toBe(true)
+  expect(
+    client.getQueryState(['protocol-profiles', 'effective', 1])?.isInvalidated
+  ).toBe(true)
+  hook.unmount()
+  client.clear()
 })
