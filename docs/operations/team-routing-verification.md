@@ -1,6 +1,6 @@
 # Team routing verification
 
-Current runtime: `v1.0.0-rc.33-fork.20260907.t100757.g3f015753`; latest change is documented in the 2026-09-07 section below. The initial 2026-09-06 evidence is retained for comparison.
+Current runtime: `v1.0.0-rc.35-fork.20260908.t153045.g02312508e398`. Historical rc.33 verification is retained below; the latest deployment is recorded in the 2026-09-08 sections.
 
 Code commit: `2c40be03`. Custom version: `v1.0.0-rc.33-fork.20260906.t143023.g2c40be03`.
 
@@ -109,3 +109,15 @@ Production rollout version, hashes and passive verification are recorded after d
 A user-reported400 exposed overly broad stateful classification on native Messages. Native context editing is now distinct from stored conversation/background state. Exact native Claude/Responses preservation of context_management objects/arrays/empty objects is covered; safe/strict cross-format and Chat paths still reject unsupported preservation. Full disposable application matrix199/199 passed,59 settlements and6188 internal quota conserved; artifact `/private/tmp/protocol-e2e/run-20260908-151956/results.json`. Focused tests and independent RelayKit build passed. Full frontend730 tests passed when run separately from heavy concurrent Go compilation; an unrelated metadata-editing timing failure occurred under simultaneous load and is retained in `/private/tmp/protocol-context-web.log` for transparency.
 
 Native `/v1/messages` plus context_management was verified via bearer authentication on Kimi, SenseNova and Volcengine with small requests; no request content or credentials were logged in the evidence. No CTYun paid probe was made.
+
+
+### Final production rollout (2026-09-08)
+
+- Runtime `v1.0.0-rc.35-fork.20260908.t153045.g02312508e398`; primary and public `/api/status` agree and all four production containers are healthy/running. Temporary canary removed after the300-second request drain. Original Caddy configuration restored exactly (hash verified).
+-39 channel policies enabled, with native Messages endpoints on Kimi/SenseNova/Volcengine and context_editing declared only on native Messages paths. Group/model abilities, input/output/cache/group prices, supplier ordering and CTYun status1 remained identical to pre-rollout guards.
+- Initial snapshot `/opt/ops-backups/protocol-routing/20260908T065345250494Z.json`; final re-enable snapshot `/opt/ops-backups/protocol-routing/20260908T075121935451Z.json`. Guards and sanitized probe outcomes live in the same directory.
+- Server GHCR pull returned unauthorized. No GitHub login credential was copied. Runtime uses a local image built from the versioned, tested static Linux binary; hotfix binary SHA256 `f4022beff21a92b6ec71e176ee177416f6cc26e05534096800d218526d5f7a29` matched local and server copies. Formal GHCR images/signatures, binaries and Electron releases also completed successfully.
+- After re-enabling policies, a management-account Messages request with clear_thinking context_management returned200/end_turn and was logged as Claude→Claude. A Responses request returned200/completed with usage and was logged as Responses→Chat. Both were bounded synthetic checks, not team request bodies.
+- CI34199701617, GHCR34199958696, binary release34199962314 and Electron34199965862 succeeded. Frontend730 tests, root/RelayKit tests and independent module build passed; independent review clear. The context-editing regression is covered by199 complete-app checks.
+- Remaining upstream limitation observed during final passive checks: SenseNova kimi-k3 produces429 rate limits and sometimes HTTP200 with an empty SSE body. A bounded direct synthetic check confirmed200/text-event-stream with0 body bytes. New routing correctly records incomplete upstream streams as failures rather than complete success. This is separate from the corrected native-context400. No attempts were made to weaken terminal checks, change pricing, widen model permissions or switch CTYun state.
+- Stateful stored-history/background emulation and the disabled Messages count_tokens endpoint remain outside this first phase. Unsupported cross-format context_management is rejected explicitly; native Chat does not advertise unsupported forwarding.
