@@ -29,6 +29,25 @@ SELECT json_build_object('kind','stream_end','reason',nullif(l.other,'')::jsonb#
 SELECT json_build_object('kind','protocol_routes','source',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}','target',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}','requests',count(*),'incomplete_streams',count(*) FILTER(WHERE nullif(l.other,'')::jsonb#>>'{{stream_status,status}}'='error'),'skipped_candidates',sum(CASE WHEN jsonb_typeof(nullif(l.other,'')::jsonb#>'{{admin_info,protocol_skips}}')='array' THEN jsonb_array_length(nullif(l.other,'')::jsonb#>'{{admin_info,protocol_skips}}') ELSE 0 END)) FROM logs l WHERE l.type=2 AND created_at BETWEEN {start} AND {end} AND nullif(l.other,'')::jsonb#>'{{admin_info,protocol_route}}' IS NOT NULL GROUP BY nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}';
 SELECT json_build_object('kind','policy','key',key,'value',value) FROM options WHERE key='RoutingPolicy';
 SELECT json_build_object('kind','health','tag',tag,'status',status,'channels',count(*)) FROM channels GROUP BY tag,status;
+SELECT json_build_object(
+ 'kind','search_tool_charges','group',l."group",'tag',c.tag,'model',l.model_name,
+ 'source',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}',
+ 'target',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}',
+ 'tool',t.item->>'name',
+ 'configured_price_per_1k',CASE WHEN jsonb_typeof(t.item->'price')='number' THEN t.item->'price' ELSE NULL END,
+ 'priced_calls',sum(CASE WHEN jsonb_typeof(t.item->'count')='number' THEN (t.item->>'count')::numeric ELSE 0 END),
+ 'consume_logs',count(*),
+ 'incomplete_streams',count(*) FILTER(WHERE nullif(l.other,'')::jsonb#>>'{{stream_status,status}}'='error'))
+FROM logs l LEFT JOIN channels c ON c.id=l.channel_id
+CROSS JOIN LATERAL jsonb_array_elements(CASE
+ WHEN jsonb_typeof(nullif(l.other,'')::jsonb->'tool_surcharges')='array'
+ THEN nullif(l.other,'')::jsonb->'tool_surcharges' ELSE '[]'::jsonb END) t(item)
+WHERE l.type=2 AND created_at BETWEEN {start} AND {end}
+ AND t.item->>'name' IN ('web_search','web_search_preview')
+GROUP BY l."group",c.tag,l.model_name,
+ nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}',
+ nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}',t.item->>'name',
+ CASE WHEN jsonb_typeof(t.item->'price')='number' THEN t.item->'price' ELSE NULL END;
 COMMIT;
 """
 # Group by the end-reason expression, not the json aggregate result.

@@ -109,3 +109,11 @@ Plus 的 Kimi 订阅白名单是 `kimi-for-coding`、`kimi-k3-256k`。Plus 火�
 排查能力时区分协议入口、具体模型、工具类型和参数组合。先核实兼容的原生路径，再考虑转换；原生路径也不意味着该模型实现协议中的所有工具。后续监测结合 HTTP、stream_status、protocol_route 和实际工具调用，不能把工具声明存在或 HTTP 200 当作功能已执行。
 
 用户后续报告的 Claude WebSearch 错误来自 `/v1/messages`。仅登记 Responses 搜索不足以支持 Messages 搜索；原错误文本展示了最后一个候选端点的缺失项，不能把其中的 stream/tools 外推为所有供应商都缺这些能力。Kimi 原生 Messages 的 `web_search_20250305` 已实际返回 server_tool_use、搜索结果及正常 message_stop，现已补齐配置。Kimi 四型号×两种原生格式的搜索均已实测；火山 kimi-k3 返回正常搜索结果，kimi-k3-256k 返回10条结果后达到测试输出限额，不能把后者称为完整最终回答。修复使用既有UI可配置字段，无需继续改代码或重启应用。
+
+### 搜索计数与附加费
+
+后续账单核查发现 Kimi 的 Messages 响应省略 `usage.server_tool_use`，原路径因此漏计搜索附加费；Responses 路径按实际输出项计数。`1e4b491ed36f` 修正计数，保持 `tool_price_setting.prices` 的现有单价及模型输入/输出/缓存价格不变。
+
+上游最终统计对象优先，包括明确的0。没有该统计时，按完整且成功的 web_search_tool_result 块去重统计 tool_use_id；流式须收到对应 content_block_stop，非流式按完整响应统计。一次搜索的多条结果只计一次，错误结果、未完成块不增加搜索费用。每个上游尝试开始前清空临时计数，避免重试串账；已观察到的实际计数替代 search-preview 模型的隐式一次搜索假设，避免重复附加。历史消费记录不重算。
+
+监测脚本新增 `search_tool_charges`，按分组、供应商、模型、入口/目标协议、工具和配置单价汇总已计费搜索次数及异常流数量。`priced_calls` 仅反映账单中的收费项，缺少该项不证明没有搜索（例如管理员将工具价格设0）；配置单价不是供应商实际账单。此部署监测器使用既有 PostgreSQL 只读连接，未修改应用数据库模型、迁移或驱动。
