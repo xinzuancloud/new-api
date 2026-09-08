@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -73,9 +74,10 @@ func ProtocolProbeFingerprint(channel *Channel) string {
 		Mapping, Setting, Params, Headers, Organization *string
 		Other, OtherSettings                            string
 		MultiKey                                        bool
+		MultiKeyStatuses                                map[int]int
 	}{channel.Id, channel.Type, channel.Key, channel.BaseURL, channel.Models,
 		channel.ModelMapping, channel.Setting, channel.ParamOverride, channel.HeaderOverride,
-		channel.OpenAIOrganization, channel.Other, channel.OtherSettings, channel.ChannelInfo.IsMultiKey})
+		channel.OpenAIOrganization, channel.Other, channel.OtherSettings, channel.ChannelInfo.IsMultiKey, channel.ChannelInfo.MultiKeyStatusList})
 	mac := hmac.New(sha256.New, []byte(common.SessionSecret))
 	_, _ = mac.Write(data)
 	return hex.EncodeToString(mac.Sum(nil))
@@ -127,6 +129,22 @@ func CreateProtocolProbeReport(report *ProtocolProbeReport) error {
 	if len(report.Cases) == 0 || len(report.Cases) > MaxProtocolProbeCases || len(data) > MaxProtocolProbeBytes {
 		return fmt.Errorf("probe plan exceeds report limits")
 	}
+	// Reserve storage for the largest result this executor can produce, plus
+	// lease and apply metadata. Never consume upstream quota for a plan whose
+	// completed evidence cannot fit the durable report row.
+	future := *report
+	future.Cases = append([]ProtocolProbeCase(nil), report.Cases...)
+	future.Status = "completed"
+	future.CreatedAt = math.MaxInt64
+	future.UpdatedAt = math.MaxInt64
+	future.AppliedRevision = strings.Repeat("a", 64)
+	for i := range future.Cases {
+		future.Cases[i].Result = ProtocolProbeResult{Outcome: "cancelled", Reason: "configuration_unavailable", HTTPStatus: 999, Terminal: false, ElapsedMS: math.MaxInt64, InputTokens: 1000000000000, OutputTokens: 1000000000000, Features: []string{"stream", "hosted_tools", "tools"}}
+	}
+	reserved, err := common.Marshal(protocolProbeStored{future, strings.Repeat("a", 64), math.MaxInt64})
+	if err != nil || len(reserved) > MaxProtocolProbeBytes {
+		return fmt.Errorf("probe plan cannot retain bounded results")
+	}
 	// Catalog serialization gives deterministic retention across concurrent creators.
 	return DB.Transaction(func(tx *gorm.DB) error {
 		if _, err := LockProtocolProfilesForProbe(tx); err != nil {
@@ -136,7 +154,7 @@ func CreateProtocolProbeReport(report *ProtocolProbeReport) error {
 			return err
 		}
 		var rows []Option
-		if err := tx.Where(clause.Like{Column: clause.Column{Name: "key"}, Value: ProtocolProbePrefix + "%"}).Find(&rows).Error; err != nil {
+		if err := lockForUpdate(tx).Where(clause.Like{Column: clause.Column{Name: "key"}, Value: ProtocolProbePrefix + "%"}).Find(&rows).Error; err != nil {
 			return err
 		}
 		type oldReport struct {
@@ -204,4 +222,28 @@ func ListProtocolProbeReports() ([]ProtocolProbeReport, error) {
 		result = append(result, stored.ProtocolProbeReport)
 	}
 	return result, nil
+}
+
+// RecoverExpiredLease is called only inside report mutation transactions. It
+// preserves completed evidence and never replays possibly consumed calls.
+func (report *ProtocolProbeReport) RecoverExpiredLease() {
+	if report.RunID == "" || report.LeaseUntil > time.Now().Unix() {
+		return
+	}
+	for i := range report.Cases {
+		if report.Cases[i].Result.Outcome == "running" {
+			report.Cases[i].Result = ProtocolProbeResult{Outcome: "unknown", Reason: "interrupted_batch"}
+		}
+	}
+	report.RunID = ""
+	report.LeaseUntil = 0
+	if report.Status == "running" {
+		report.Status = "completed"
+		for _, test := range report.Cases {
+			if test.Result.Outcome == "pending" {
+				report.Status = "pending"
+				break
+			}
+		}
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -197,6 +198,29 @@ func TestProtocolProbeWorkflow(t *testing.T) {
 	stored, err = model.ReadProtocolProbeReport(nil, report.ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, "cancelled", stored.Status)
+
+	// Cancelled crash recovery retains earlier paid evidence and permits preview.
+	_, err = model.MutateProtocolProbeReport(report.ID, func(saved *model.ProtocolProbeReport) error {
+		saved.RunID = "abandoned"
+		saved.LeaseUntil = time.Now().Unix() - 1
+		saved.Cases[0].Result = model.ProtocolProbeResult{Outcome: "passed", Reason: "verified_fixture", Terminal: true}
+		saved.Cases[1].Result.Outcome = "running"
+		return nil
+	})
+	require.NoError(t, err)
+	response = invoke(ApplyProtocolProbe, map[string]any{"revision": protocol_setting.Revision(current), "preview": true})
+	require.Equal(t, 200, response.Code, response.Body.String())
+	stored, err = model.ReadProtocolProbeReport(nil, report.ID, false)
+	require.NoError(t, err)
+	assert.Empty(t, stored.RunID)
+	assert.Equal(t, "passed", stored.Cases[0].Result.Outcome)
+	assert.Equal(t, "interrupted_batch", stored.Cases[1].Result.Reason)
+	// Reject an oversized future result before issuing any provider calls.
+	oversized := &model.ProtocolProbeReport{Profile: "vendor", ProfileRevision: strings.Repeat("a", 64), Fingerprints: map[int]string{1: strings.Repeat("b", 64)}, MaxOutputTokens: 256}
+	for i := range 128 {
+		oversized.Cases = append(oversized.Cases, model.ProtocolProbeCase{ID: i + 1, ChannelID: 1, Model: strings.Repeat("m", 220), Endpoint: dto.ProtocolEndpoint{Format: "openai", Path: "/v1/chat/completions"}, Check: "tools", Result: model.ProtocolProbeResult{Outcome: "pending", Reason: "not_run"}})
+	}
+	require.Error(t, model.CreateProtocolProbeReport(oversized))
 	// Binding previews and direct channel writes share the same catalog contract
 	// on SQLite, MySQL and PostgreSQL.
 	rev := protocol_setting.Revision(current)
@@ -216,5 +240,24 @@ func TestProtocolProbeWorkflow(t *testing.T) {
 	assert.EqualValues(t, 91, channel.UsedQuota)
 	_, err = model.UpdateProtocolProfiles(rev, protocol_setting.Catalog{})
 	require.NoError(t, err)
+
+	// Retention keeps the leased report even when it is older than all others.
+	_, err = model.MutateProtocolProbeReport(report.ID, func(saved *model.ProtocolProbeReport) error {
+		saved.CreatedAt = 1
+		saved.RunID = "active"
+		saved.LeaseUntil = time.Now().Add(time.Minute).Unix()
+		return nil
+	})
+	require.NoError(t, err)
+	for range 20 {
+		candidate := &model.ProtocolProbeReport{Profile: "vendor", ProfileRevision: strings.Repeat("a", 64), Fingerprints: map[int]string{}, MaxOutputTokens: 256, Cases: []model.ProtocolProbeCase{{ID: 1, ChannelID: 1, Model: "model", Endpoint: dto.ProtocolEndpoint{Format: "openai", Path: "/v1/chat/completions"}, Check: "text", Result: model.ProtocolProbeResult{Outcome: "pending", Reason: "not_run"}}}}
+		require.NoError(t, model.CreateProtocolProbeReport(candidate))
+	}
+	reports, err := model.ListProtocolProbeReports()
+	require.NoError(t, err)
+	assert.Len(t, reports, 20)
+	stored, err = model.ReadProtocolProbeReport(nil, report.ID, false)
+	require.NoError(t, err)
+	assert.Equal(t, "active", stored.RunID)
 
 }

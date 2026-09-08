@@ -258,13 +258,7 @@ func RunProtocolProbe(c *gin.Context) {
 		if report.LeaseUntil > time.Now().Unix() {
 			return model.ErrProtocolConflict
 		}
-		if report.RunID != "" {
-			for i := range report.Cases {
-				if report.Cases[i].Result.Outcome == "running" {
-					report.Cases[i].Result = model.ProtocolProbeResult{Outcome: "unknown", Reason: "interrupted_batch"}
-				}
-			}
-		}
+		report.RecoverExpiredLease()
 		for i := range report.Cases {
 			test := &report.Cases[i]
 			if test.Result.Outcome != "pending" {
@@ -344,6 +338,7 @@ func CancelProtocolProbe(c *gin.Context) {
 		if report.Status == "applied" {
 			return model.ErrProtocolConflict
 		}
+		report.RecoverExpiredLease()
 		report.Status = "cancelled"
 		for i := range report.Cases {
 			if report.Cases[i].Result.Outcome == "pending" {
@@ -459,6 +454,13 @@ func ApplyProtocolProbe(c *gin.Context) {
 	if err != nil {
 		protocolProfileError(c, err)
 		return
+	}
+	if report.RunID != "" && report.LeaseUntil <= time.Now().Unix() {
+		report, err = model.MutateProtocolProbeReport(report.ID, func(saved *model.ProtocolProbeReport) error { saved.RecoverExpiredLease(); return nil })
+		if err != nil {
+			protocolProfileError(c, err)
+			return
+		}
 	}
 	if report.AppliedRevision != "" {
 		c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"revision": report.AppliedRevision, "applied": true}})

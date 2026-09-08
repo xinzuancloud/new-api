@@ -98,3 +98,10 @@ func TestProtocolProbeTransportBoundaries(t *testing.T) {
 	result = RunProtocolProbe(ctx, &upstream, test, 256)
 	assert.Equal(t, "cancelled", result.Outcome)
 }
+
+func TestProtocolProbeFingerprintTracksAccountSelection(t *testing.T) {
+	channel := model.Channel{Id: 1, Type: 1, Key: "first\nsecond", ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeyStatusList: map[int]int{0: common.ChannelStatusEnabled, 1: common.ChannelStatusEnabled}}}
+	before := model.ProtocolProbeFingerprint(&channel)
+	channel.ChannelInfo.MultiKeyStatusList[0] = common.ChannelStatusManuallyDisabled
+	assert.NotEqual(t, before, model.ProtocolProbeFingerprint(&channel))
+}
