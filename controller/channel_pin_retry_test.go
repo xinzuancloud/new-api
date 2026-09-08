@@ -111,3 +111,11 @@ func TestShouldRetryStopsWhenClientContextEnds(t *testing.T) {
 		cancel()
 	}
 }
+
+func TestShouldRetryDoesNotAppendAnotherProviderAfterStreamStarts(t *testing.T) {
+	c := newPinRetryContext()
+	_, err := c.Writer.Write([]byte("data: partial\n\n"))
+	require.NoError(t, err)
+	upstreamErr := types.NewOpenAIError(errors.New("upstream interrupted"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway)
+	assert.False(t, shouldRetry(c, upstreamErr, 32))
+}

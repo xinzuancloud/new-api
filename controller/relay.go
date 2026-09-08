@@ -117,6 +117,29 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if newAPIError != nil {
 			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
+			if route, exists := c.Get("protocol_route"); exists && route != nil && c.Writer.Written() {
+				if !c.GetBool("protocol_stream_error_written") && c.Request.Context().Err() == nil {
+					payload := gin.H{"error": newAPIError.ToOpenAIError()}
+					event := ""
+					if relayFormat == types.RelayFormatClaude {
+						event = "error"
+						payload = gin.H{"type": "error", "error": newAPIError.ToClaudeError()}
+					}
+					if relayFormat == types.RelayFormatOpenAIResponses {
+						event = "error"
+						payload = gin.H{"type": "error", "code": newAPIError.GetErrorCode(), "message": newAPIError.Error()}
+					}
+					encoded, encodeErr := common.Marshal(payload)
+					if encodeErr == nil {
+						if event != "" {
+							_, _ = c.Writer.WriteString("event: " + event + "\n")
+						}
+						_, _ = c.Writer.WriteString("data: " + string(encoded) + "\n\n")
+						c.Writer.Flush()
+					}
+				}
+				return
+			}
 			switch relayFormat {
 			case types.RelayFormatOpenAIRealtime:
 				helper.WssError(c, ws, newAPIError.ToOpenAIError())
@@ -226,7 +249,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		relayInfo.RetryIndex = retryParam.GetRetry()
-		channel, channelErr := getChannel(c, relayInfo, retryParam)
+		channel, protocolPlan, channelErr := getProtocolChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
 			newAPIError = channelErr
@@ -250,15 +273,19 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
-		switch relayFormat {
-		case types.RelayFormatOpenAIRealtime:
-			newAPIError = relay.WssHelper(c, relayInfo)
-		case types.RelayFormatClaude:
-			newAPIError = relay.ClaudeHelper(c, relayInfo)
-		case types.RelayFormatGemini:
-			newAPIError = geminiRelayHandler(c, relayInfo)
-		default:
-			newAPIError = relayHandler(c, relayInfo)
+		if protocolPlan != nil {
+			newAPIError = relay.ExecuteProtocolRequest(c, relayInfo, protocolPlan)
+		} else {
+			switch relayFormat {
+			case types.RelayFormatOpenAIRealtime:
+				newAPIError = relay.WssHelper(c, relayInfo)
+			case types.RelayFormatClaude:
+				newAPIError = relay.ClaudeHelper(c, relayInfo)
+			case types.RelayFormatGemini:
+				newAPIError = geminiRelayHandler(c, relayInfo)
+			default:
+				newAPIError = relayHandler(c, relayInfo)
+			}
 		}
 
 		if newAPIError != nil && errors.Is(c.Request.Context().Err(), context.DeadlineExceeded) {
@@ -369,6 +396,42 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 	return meta
 }
 
+// getProtocolChannel preflights declared endpoint capabilities before an
+// upstream attempt is recorded. Supplier ordering still belongs to the existing
+// selector; the only added filter excludes incompatible channel candidates.
+func getProtocolChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *relay.PreparedProtocolRequest, *types.NewAPIError) {
+	var lastCapabilityError *types.NewAPIError
+	for checked := 0; checked < 1024; checked++ {
+		selected, apiErr := getChannel(c, info, retryParam)
+		if apiErr != nil {
+			if lastCapabilityError != nil && len(c.GetStringSlice("use_channel")) == 0 {
+				return nil, nil, lastCapabilityError
+			}
+			return nil, nil, apiErr
+		}
+		plan, apiErr := relay.PrepareProtocolRequest(c, info)
+		if apiErr == nil {
+			return selected, plan, nil
+		}
+		if apiErr.GetErrorCode() != relay.ErrorCodeProtocolCapability {
+			return nil, nil, apiErr
+		}
+		lastCapabilityError = apiErr
+		constraints := service.GetChannelConstraints(c)
+		if _, pinned, _ := constraints.ResolvedPin(); pinned {
+			return nil, nil, apiErr
+		}
+		constraints.AddFilter(taskdto.ChannelFilter{Kind: taskdto.FilterExcludedChannels, ExcludedChannelIDs: []int{selected.Id}})
+		skips, _ := c.Get("protocol_skips")
+		entries, _ := skips.([]map[string]any)
+		if len(entries) < 64 {
+			entries = append(entries, map[string]any{"channel_id": selected.Id, "reason": apiErr.Error()})
+			c.Set("protocol_skips", entries)
+		}
+	}
+	return nil, nil, types.NewErrorWithStatusCode(fmt.Errorf("protocol candidate search limit reached"), relay.ErrorCodeProtocolCapability, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+}
+
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
 	if info.ChannelMeta == nil {
 		autoBan := c.GetBool("auto_ban")
@@ -401,6 +464,9 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 }
 
 func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {
+	if c.Writer != nil && c.Writer.Written() {
+		return false
+	}
 	if c.Request != nil && c.Request.Context().Err() != nil {
 		return false
 	}

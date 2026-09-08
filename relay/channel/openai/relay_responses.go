@@ -76,6 +76,10 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	var responseTextBuilder strings.Builder
 	imageCounter := &relaycommon.ImageGenerationCallCounter{}
 	imageCommitted := false
+	var streamErr *types.NewAPIError
+	var sawTerminal bool
+	route, routeExists := c.Get("protocol_route")
+	protocolRouting := routeExists && route != nil
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 
@@ -83,10 +87,66 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		var streamResponse dto.ResponsesStreamResponse
 		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
 			logger.LogError(c, "failed to unmarshal stream response: "+err.Error())
-			sr.Error(err)
+			if protocolRouting {
+				streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+				sr.Stop(streamErr)
+			} else {
+				sr.Error(err)
+			}
 			return
 		}
-		sendResponsesStreamData(c, streamResponse, data)
+		if protocolRouting {
+			if streamResponse.Response != nil && streamResponse.Response.Usage != nil {
+				usage = dto.MergeUsageNonZero(usage, relayconvert.NormalizeResponsesUsage(streamResponse.Response.Usage))
+			}
+			switch streamResponse.Type {
+			case "response.completed", "response.done", "response.incomplete":
+				response := streamResponse.Response
+				status := ""
+				valid := response != nil
+				if valid && len(response.Status) > 0 {
+					valid = common.Unmarshal(response.Status, &status) == nil
+				}
+				if streamResponse.Type == "response.incomplete" {
+					valid = valid && (status == "" || status == "incomplete") && response.IncompleteDetails != nil &&
+						(response.IncompleteDetails.Reason == "max_output_tokens" || response.IncompleteDetails.Reason == "content_filter")
+				} else {
+					valid = valid && (status == "" || status == "completed")
+				}
+				if !valid {
+					streamErr = types.NewOpenAIError(fmt.Errorf("invalid upstream Responses terminal event"), types.ErrorCodeBadResponse, http.StatusBadGateway)
+					sr.Stop(streamErr)
+					return
+				}
+				sawTerminal = true
+			case "error", "response.error", "response.failed", "response.cancelled", "response.canceled":
+				upstreamError := &types.OpenAIError{Type: "server_error", Code: streamResponse.Code, Message: streamResponse.Message}
+				if streamResponse.Response != nil && streamResponse.Response.GetOpenAIError() != nil {
+					upstreamError = streamResponse.Response.GetOpenAIError()
+				}
+				if upstreamError.Message == "" {
+					upstreamError.Message = "upstream Responses stream failed"
+				}
+				streamErr = types.WithOpenAIError(*upstreamError, http.StatusBadGateway)
+			}
+			if err := helper.ResponseChunkData(c, streamResponse, data); err != nil {
+				streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusBadGateway)
+				sr.Stop(streamErr)
+				return
+			}
+			if streamErr != nil {
+				c.Set("protocol_stream_error_written", true)
+				if !imageCommitted {
+					imageCounter.Reset()
+					imageCounter.Commit(info)
+					imageCommitted = true
+				}
+				sr.Stop(streamErr)
+				return
+			}
+		} else {
+			sendResponsesStreamData(c, streamResponse, data)
+		}
 		switch streamResponse.Type {
 		case "response.completed", "response.done":
 			if streamResponse.Response != nil {
@@ -139,6 +199,17 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		}
 	})
 
+	if protocolRouting && streamErr == nil {
+		if !info.StreamStatus.IsSuccessful() {
+			streamErr = types.NewOpenAIError(fmt.Errorf("upstream Responses stream interrupted: %s", info.StreamStatus.EndReason), types.ErrorCodeBadResponse, http.StatusBadGateway)
+		} else if !sawTerminal {
+			streamErr = types.NewOpenAIError(fmt.Errorf("upstream Responses stream ended without a terminal event"), types.ErrorCodeBadResponse, http.StatusBadGateway)
+		}
+	}
+	if streamErr != nil && !info.StreamStatus.HasErrors() {
+		info.StreamStatus.RecordError(streamErr.Error())
+	}
+
 	if usage.CompletionTokens == 0 {
 		// 计算输出文本的 token 数量
 		tempStr := responseTextBuilder.String()
@@ -158,5 +229,5 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		usage.BillingUsage = dto.CloneBillingUsageWithEstimatedCompletion(usage.BillingUsage, usage.CompletionTokens)
 	}
 
-	return usage, nil
+	return usage, streamErr
 }

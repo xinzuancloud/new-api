@@ -709,3 +709,25 @@ func inputContentText(t *testing.T, item map[string]any) string {
 	require.True(t, ok)
 	return text
 }
+
+func TestConvertRequestClaudeToChatRetainsTextAlongsideToolCalls(t *testing.T) {
+	info := &convmeta.Values{ConversionChain: []types.RelayFormat{types.RelayFormatClaude}}
+	request := &dto.ClaudeRequest{Model: "claude-test", Messages: []dto.ClaudeMessage{{Role: "assistant", Content: []dto.ClaudeMediaMessage{
+		{Type: "text", Text: kitutil.GetPointer("before")},
+		{Type: "tool_use", Id: "call_1", Name: "lookup", Input: map[string]any{"q": "x"}},
+		{Type: "text", Text: kitutil.GetPointer("after")},
+	}}}}
+	result, err := ConvertRequest(nil, info, types.RelayFormatOpenAI, request)
+	require.NoError(t, err)
+	out := result.Value.(*dto.GeneralOpenAIRequest)
+	raw, err := kitutil.Marshal(out)
+	require.NoError(t, err)
+	var body map[string]any
+	require.NoError(t, kitutil.Unmarshal(raw, &body))
+	messages := body["messages"].([]any)
+	require.Len(t, messages, 1)
+	message := messages[0].(map[string]any)
+	assert.Equal(t, "assistant", message["role"])
+	assert.Equal(t, []any{map[string]any{"type": "text", "text": "before"}, map[string]any{"type": "text", "text": "after"}}, message["content"])
+	assert.Equal(t, []any{map[string]any{"id": "call_1", "type": "function", "function": map[string]any{"name": "lookup", "arguments": `{"q":"x"}`}}}, message["tool_calls"])
+}

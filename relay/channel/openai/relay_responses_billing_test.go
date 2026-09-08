@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -264,4 +265,61 @@ func TestOaiResponsesStreamHandlerDoesNotCountPartialImageEvent(t *testing.T) {
 	)
 
 	assert.Equal(t, 0, info.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolImageGeneration].CallCount)
+}
+
+func TestNativeResponsesProtocolStreamTerminalsAndUsage(t *testing.T) {
+	service.InitTokenEncoders()
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+	for _, tc := range []struct {
+		name, ending                      string
+		wantError, forwardedError, legacy bool
+	}{
+		{name: "completed", ending: `{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":20}}}}`},
+		{name: "done", ending: `{"type":"response.done","response":{"status":"completed","usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":20}}}}`},
+		{name: "incomplete", ending: `{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":20}}}}`},
+		{name: "failed", ending: `{"type":"response.failed","response":{"status":"failed","error":{"type":"server_error","message":"fixture failure"},"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":20}}}}`, wantError: true, forwardedError: true},
+		{name: "error", ending: `{"type":"error","code":"server_error","message":"fixture failure"}`, wantError: true, forwardedError: true},
+		{name: "malformed", ending: `{bad json`, wantError: true},
+		{name: "eof", wantError: true},
+		{name: "invalid completed", ending: `{"type":"response.completed","response":{"status":"in_progress"}}`, wantError: true},
+		{name: "invalid incomplete", ending: `{"type":"response.incomplete","response":{"status":"incomplete"}}`, wantError: true},
+		{name: "legacy eof", legacy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "data: " + `{"type":"response.created","response":{"id":"resp_fixture","model":"gpt-test","usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":20}}}}` + "\n\ndata: " + `{"type":"response.output_text.delta","delta":"partial"}` + "\n\n"
+			if tc.name == "failed" || tc.name == "incomplete" {
+				body = "data: " + `{"type":"response.output_text.delta","delta":"partial"}` + "\n\n"
+			}
+			if tc.ending != "" {
+				body += "data: " + tc.ending + "\n\n"
+			}
+			c, recorder, resp, info := newResponsesChatTestContext(t, body, true)
+			if !tc.legacy {
+				c.Set("protocol_route", map[string]any{"source": "fixture"})
+			}
+			usage, apiErr := OaiResponsesStreamHandler(c, info, resp)
+			if tc.legacy {
+				assert.Nil(t, apiErr)
+				return
+			}
+			require.NotNil(t, usage)
+			assert.Equal(t, 100, usage.PromptTokens)
+			assert.Equal(t, 10, usage.CompletionTokens)
+			assert.Equal(t, 110, usage.TotalTokens)
+			assert.Equal(t, 20, usage.PromptTokensDetails.CachedTokens)
+			assert.Contains(t, recorder.Body.String(), "partial")
+			if tc.wantError {
+				assert.NotNil(t, apiErr)
+				assert.False(t, info.StreamStatus.IsSuccessful())
+				assert.NotContains(t, recorder.Body.String(), "response.completed")
+			} else {
+				assert.Nil(t, apiErr)
+				assert.True(t, info.StreamStatus.IsSuccessful())
+				assert.Contains(t, recorder.Body.String(), tc.ending)
+			}
+			assert.Equal(t, tc.forwardedError, c.GetBool("protocol_stream_error_written"))
+		})
+	}
 }

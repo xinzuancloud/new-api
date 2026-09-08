@@ -162,7 +162,7 @@ func convertResponsesResponseForClient(c *gin.Context, info *relaycommon.RelayIn
 	return result.Value, usage, nil
 }
 
-func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (usage *dto.Usage, apiErr *types.NewAPIError) {
 	if resp == nil || resp.Body == nil {
 		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
@@ -180,6 +180,15 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
 	streamErr := (*types.NewAPIError)(nil)
+	sawTerminal := false
+	defer func() {
+		if apiErr != nil {
+			usage = convertedStreamUsage(c, info, state)
+			if info.StreamStatus != nil && !info.StreamStatus.HasErrors() {
+				info.StreamStatus.RecordError(apiErr.Error())
+			}
+		}
+	}()
 
 	if info.RelayFormat == types.RelayFormatClaude && info.ClaudeConvertInfo == nil {
 		info.ClaudeConvertInfo = &relaycommon.ClaudeConvertInfo{LastMessagesType: relaycommon.LastMessageTypeNone}
@@ -253,11 +262,15 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		var streamResp dto.ResponsesStreamResponse
 		if err := common.UnmarshalJsonStr(data, &streamResp); err != nil {
 			logger.LogError(c, "failed to unmarshal responses stream event: "+err.Error())
-			sr.Error(err)
+			streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+			sr.Stop(streamErr)
 			return
 		}
+		if streamResp.Response != nil && streamResp.Response.Usage != nil {
+			state.SetUsage(dto.MergeUsageNonZero(state.Usage(), relayconvert.UsageFromResponsesUsage(streamResp.Response.Usage)))
+		}
 
-		if streamResp.Type == "response.error" || streamResp.Type == "response.failed" {
+		if streamResp.Type == "response.error" || streamResp.Type == "response.failed" || streamResp.Type == "error" {
 			if streamResp.Response != nil {
 				if oaiErr := streamResp.Response.GetOpenAIError(); oaiErr != nil && oaiErr.Type != "" {
 					streamErr = types.WithOpenAIError(*oaiErr, http.StatusInternalServerError)
@@ -270,6 +283,9 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			return
 		}
 
+		if streamResp.Type == "response.completed" || streamResp.Type == "response.done" || streamResp.Type == "response.incomplete" {
+			sawTerminal = true
+		}
 		results, err := service.ConvertStreamResponseChunk(c, info, state, &streamResp)
 		if err != nil {
 			streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
@@ -284,11 +300,17 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		}
 	})
 
+	if streamErr == nil && !info.StreamStatus.IsSuccessful() {
+		streamErr = types.NewOpenAIError(fmt.Errorf("upstream responses stream interrupted: %s", info.StreamStatus.EndReason), types.ErrorCodeBadResponse, http.StatusBadGateway)
+	}
+	if streamErr == nil && !sawTerminal {
+		streamErr = types.NewOpenAIError(fmt.Errorf("upstream responses stream ended without a terminal event"), types.ErrorCodeBadResponse, http.StatusBadGateway)
+	}
 	if streamErr != nil {
 		return nil, streamErr
 	}
 
-	usage := state.Usage()
+	usage = convertedStreamUsage(c, info, state)
 	if usage == nil || usage.TotalTokens == 0 {
 		usage = service.ResponseText2Usage(c, state.UsageText(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 		state.SetUsage(usage)
@@ -316,4 +338,20 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		helper.Done(c)
 	}
 	return usage, nil
+}
+
+// convertedStreamUsage retains upstream accounting details on a failed stream.
+// Only estimate when some output exists; a rejected stream is not generated output.
+func convertedStreamUsage(c *gin.Context, info *relaycommon.RelayInfo, state *relayconvert.ResponseStreamState) *dto.Usage {
+	usage := state.Usage()
+	if usage != nil && usage.InputTokensDetails != nil {
+		usage = relayconvert.NormalizeResponsesUsage(usage)
+	}
+	if usage != nil && (usage.TotalTokens != 0 || usage.PromptTokens != 0 || usage.CompletionTokens != 0) {
+		return usage
+	}
+	if text := state.UsageText(); text != "" {
+		return service.ResponseText2Usage(c, text, info.UpstreamModelName, info.GetEstimatePromptTokens())
+	}
+	return nil
 }

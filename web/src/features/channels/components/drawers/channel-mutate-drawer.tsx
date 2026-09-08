@@ -81,7 +81,14 @@ import {
 } from '@/components/ui/form'
 import { IconBadge, type IconBadgeTone } from '@/components/ui/icon-badge'
 import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import {
   Sheet,
@@ -186,6 +193,7 @@ import {
   ChannelEditorLoadingState,
   ChannelModelsSection,
 } from './sections'
+import { ChannelProtocolRoutingSection } from './sections/channel-protocol-routing-section'
 
 type ChannelMutateDrawerProps = {
   open: boolean
@@ -249,6 +257,7 @@ const CHANNEL_EDITOR_MAIN_SECTION_IDS = [
   CHANNEL_EDITOR_SECTION_IDS.advanced,
 ]
 const ADVANCED_SETTINGS_SECTION_IDS = {
+  protocolRouting: 'channel-section-advanced-protocol-routing',
   routingStrategy: 'channel-section-advanced-routing-strategy',
   internalNotes: 'channel-section-advanced-internal-notes',
   overrideRules: 'channel-section-advanced-override-rules',
@@ -273,6 +282,11 @@ const SENSITIVE_FORM_FIELDS = [
   'settings',
   'setting',
   'advanced_custom',
+  'protocol_routing_enabled',
+  'protocol_routing_account_resource',
+  'protocol_routing_quota_scope',
+  'protocol_routing_defaults',
+  'protocol_routing_models',
   'is_enterprise_account',
   'vertex_key_type',
   'aws_key_type',
@@ -326,6 +340,8 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     hasConfiguredOverrideValue(values.param_override) ||
     hasConfiguredOverrideValue(values.header_override) ||
     values.advanced_custom?.trim() ||
+    values.protocol_routing_enabled ||
+    values.protocol_routing_defaults?.trim() ||
     hasConfiguredOverrideValue(values.status_code_mapping) ||
     values.tag?.trim() ||
     values.remark?.trim() ||
@@ -715,6 +731,8 @@ export function ChannelMutateDrawer({
     'upstream_model_update_check_enabled'
   )
   const currentSettings = form.watch('settings')
+  const currentProtocolRoutingEnabled = form.watch('protocol_routing_enabled')
+  const currentProtocolRoutingDefaults = form.watch('protocol_routing_defaults')
   const currentAdvancedCustom = form.watch('advanced_custom')
   const currentPriority = form.watch('priority')
   const currentWeight = form.watch('weight')
@@ -1039,7 +1057,11 @@ export function ChannelMutateDrawer({
     currentUpstreamModelUpdateAutoSyncEnabled ||
     currentUpstreamModelUpdateIgnoredModels?.trim()
   )
+  const protocolRoutingConfigured = Boolean(
+    currentProtocolRoutingEnabled || currentProtocolRoutingDefaults?.trim()
+  )
   const advancedConfigured = Boolean(
+    protocolRoutingConfigured ||
     routingStrategyConfigured ||
     internalNotesConfigured ||
     overrideRulesConfigured ||
@@ -1062,6 +1084,11 @@ export function ChannelMutateDrawer({
       id: ADVANCED_SETTINGS_SECTION_IDS.overrideRules,
       title: t('Override Rules'),
       configured: overrideRulesConfigured,
+    },
+    {
+      id: ADVANCED_SETTINGS_SECTION_IDS.protocolRouting,
+      title: t('Protocol routing'),
+      configured: protocolRoutingConfigured,
     },
     {
       id: ADVANCED_SETTINGS_SECTION_IDS.extraSettings,
@@ -1980,35 +2007,35 @@ export function ChannelMutateDrawer({
                                 <FormItem>
                                   <FormLabel>{t('Task plugin *')}</FormLabel>
                                   {canBindTaskPlugin ? (
-                                    <FormControl><Combobox
-value={field.value}
-onValueChange={(value) => {
-                                        field.onChange(value)
-                                        const plugin =
-                                          taskPluginOptionsQuery.data?.find(
-                                            (item) => item.key === value
-                                          )
-                                        if (plugin?.models?.length) {
-                                          form.setValue(
-                                            'models',
-                                            formatModelsArray(plugin.models),
-                                            {
-                                              shouldDirty: true,
-                                            }
-                                          )
-                                        }
-                                      }}
-options={(
-                                        taskPluginOptionsQuery.data ?? []
-                                      ).map((plugin) => ({
-                                        value: plugin.key,
-                                        label: `${plugin.name} (${plugin.key})`,
-                                      }))}
-className='w-full'
-placeholder={t(
-                                              'Select task plugin'
-                                            )}
-/></FormControl>
+                                    <FormControl>
+                                      <Combobox
+                                        value={field.value}
+                                        onValueChange={(value) => {
+                                          field.onChange(value)
+                                          const plugin =
+                                            taskPluginOptionsQuery.data?.find(
+                                              (item) => item.key === value
+                                            )
+                                          if (plugin?.models?.length) {
+                                            form.setValue(
+                                              'models',
+                                              formatModelsArray(plugin.models),
+                                              {
+                                                shouldDirty: true,
+                                              }
+                                            )
+                                          }
+                                        }}
+                                        options={(
+                                          taskPluginOptionsQuery.data ?? []
+                                        ).map((plugin) => ({
+                                          value: plugin.key,
+                                          label: `${plugin.name} (${plugin.key})`,
+                                        }))}
+                                        className='w-full'
+                                        placeholder={t('Select task plugin')}
+                                      />
+                                    </FormControl>
                                   ) : (
                                     <FormControl>
                                       <Input
@@ -4049,6 +4076,12 @@ placeholder={t(
                             </fieldset>
                           </div>
                         </div>
+
+                        <ChannelProtocolRoutingSection
+                          form={form}
+                          disabled={sensitiveLocked || isSubmitting}
+                          id={ADVANCED_SETTINGS_SECTION_IDS.protocolRouting}
+                        />
 
                         {/* ── Extra Settings ── */}
                         <div

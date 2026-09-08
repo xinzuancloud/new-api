@@ -18,6 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { z } from 'zod'
 
+import type { ProtocolRoutingSettings } from './lib/protocol-routing'
+
 // ============================================================================
 // Channel Schema & Types
 // ============================================================================
@@ -80,6 +82,7 @@ export type Channel = z.infer<typeof channelSchema>
 // ============================================================================
 
 export interface ChannelSettings {
+  protocol_routing?: ProtocolRoutingSettings
   force_format?: boolean
   thinking_to_content?: boolean
   proxy?: string

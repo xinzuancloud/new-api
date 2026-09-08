@@ -982,6 +982,12 @@ func (channel *Channel) ValidateSettings() error {
 	if err := channelParams.ValidateHTTPTransport(); err != nil {
 		return err
 	}
+	if err := channelParams.ProtocolRouting.Validate(); err != nil {
+		return err
+	}
+	if channelParams.ProtocolRouting != nil && channelParams.ProtocolRouting.Enabled && !common.SupportsProtocolRoutingChannelType(channel.Type) {
+		return fmt.Errorf("protocol routing is not supported by this channel authentication adapter")
+	}
 	channelOtherSettings := &dto.ChannelOtherSettings{}
 	if channel.OtherSettings != "" {
 		err := common.UnmarshalJsonStr(channel.OtherSettings, channelOtherSettings)

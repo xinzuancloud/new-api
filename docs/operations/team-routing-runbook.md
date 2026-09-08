@@ -60,3 +60,18 @@ Plus 的 Kimi 订阅白名单是 `kimi-for-coding`、`kimi-k3-256k`。Plus 火�
 ## 2026-09-07 全账号遍历修正
 
 旧模式每个供应商最多尝试3个账号，导致12个SenseNova账号仅试3个就回退。现有UI允许每标签次数设0（全部）或1–256，整次请求上限设0（继承原生重试）或1–1024。生产选择全部/32，保留300秒总时限、60秒限流冷却和原分组权限。已锁定原始渠道的任务保留原生重试语义，不将锁定任务作为可自由切换的账号池。
+
+
+## 2026-09-08 协议能力路由
+
+渠道设置 `protocol_routing` 为可选原子配置。未启用的渠道保持原行为；启用后，`defaults` 定义入口协议与已验证端点，`models` 按映射后的上游模型完整覆盖默认策略。路径附加在已有上游 Base URL；预置 Coding Plan 按目标协议选择对应 Base URL。当前认证适配范围为 OpenAI、Anthropic、Moonshot、VolcEngine，其他类型不能启用。
+
+每个端点声明 `openai`、`claude` 或 `openai_responses`，以及 stream/tools/parallel_tools/images/files/audio/video/structured_output/reasoning/hosted_tools 等能力和验证日期。未知能力不默认开放。入口支持不代表目标模型支持全部参数；例如实际原生测试确认 Kimi 开启 thinking 时不能指定强制 tool_choice，关闭 thinking 后两个原生协议均能完成工具调用。是否改变思考设置由管理员在 UI 中显式决定。
+
+`loss_policy` 默认 safe，跨协议在发送前拒绝已知不可保留的字段或工具历史；strict 更严格，allow 是明确允许损耗的选择。stateful/background 在第一阶段始终拒绝，不模拟 previous_response_id/会话存储。Messages count_tokens 路由仍未启用，本次不将其伪装成可用。
+
+选择顺序仍是分组供应商顺序；同账号优先原生协议，转换不会跨越白名单或替换模型。不兼容候选只记入 `admin_info.protocol_skips`，不消耗上游尝试次数；已发送流式字节后禁止切换供应商。流式失败发出客户端格式的错误事件，保留已报告的部分用量结算，不能在失败流后补成功完成事件。
+
+`account_resource` 为非秘密账号资源标识；同一账号的渠道别名使用同一个值。`quota_scope` 可为 model（默认，使用链式映射后的上游模型）或 account。共享冷却和本次请求排除均跨别名生效，不重新尝试同一个资源。未配置标识时沿用渠道身份；多 Key 渠道仍以渠道为资源，不声称已支持 Key 级独立账号轮换。
+
+现有调用日志显示转换链和最终协议；管理员信息增加 protocol_route/source/target/path/loss_policy 与协议候选跳过原因。监测脚本增加 protocol_routes 聚合。SQL 初始配置可用 `ops/protocol-routing-configure.py`，默认只预览；`--apply` 在乐观并发检查的事务内仅更新协议字段，0600 快照仅保存原协议字段。SQL 更新后须正常重启/刷新渠道缓存。回滚恢复快照中的协议字段和原镜像，不恢复整库，也不修改价格或渠道启停。

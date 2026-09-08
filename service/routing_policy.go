@@ -13,18 +13,20 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	hostreasoning "github.com/QuantumNous/new-api/setting/reasoning"
 	"github.com/gin-gonic/gin"
 )
 
 type routingCooldownKey struct {
-	Channel int
-	Model   string
+	Resource string
+	Model    string
 }
 
 var routingCooldowns sync.Map
 
-// RecordRoutingFailure quarantines only this channel/model. It neither changes
-// persistent channel status nor probes providers, and never stores error bodies.
+// RecordRoutingFailure quarantines this account/model, or the whole account
+// when configured. It never changes persistent channel status, probes providers,
+// or stores error bodies.
 func RecordRoutingFailure(c *gin.Context, channelID int, modelName string, status int, message string) {
 	policy := operation_setting.GetRoutingPolicy()
 	if !policy.Enabled {
@@ -54,7 +56,14 @@ func RecordRoutingFailure(c *gin.Context, channelID int, modelName string, statu
 		}
 		return true
 	})
-	key := routingCooldownKey{channelID, routingModelName(channelID, modelName)}
+	channel, err := model.CacheGetChannel(channelID)
+	if err != nil {
+		return
+	}
+	key, err := routingAccountKey(channel, modelName)
+	if err != nil {
+		return
+	}
 	until := now.Add(time.Duration(seconds) * time.Second)
 	for {
 		previous, exists := routingCooldowns.Load(key)
@@ -92,6 +101,7 @@ func SelectPolicyChannel(param *RetryParam, group string) (*model.Channel, bool,
 	}
 	excluded := []int{}
 	attempts := map[string]int{}
+	usedResources := map[string]bool{}
 	for _, idStr := range param.Ctx.GetStringSlice("use_channel") {
 		id, err := strconv.Atoi(idStr)
 		if err != nil {
@@ -99,17 +109,18 @@ func SelectPolicyChannel(param *RetryParam, group string) (*model.Channel, bool,
 		}
 		excluded = append(excluded, id)
 		channel, err := model.CacheGetChannel(id)
-		if err == nil && channel.Tag != nil {
-			attempts[*channel.Tag]++
+		if err == nil {
+			key, _ := routingAccountKey(channel, param.ModelName)
+			usedResources[key.Resource] = true
+			if channel.Tag != nil {
+				attempts[*channel.Tag]++
+			}
 		}
 	}
 	now := time.Now()
 	routingCooldowns.Range(func(key, value any) bool {
-		k := key.(routingCooldownKey)
 		if !value.(time.Time).After(now) {
 			routingCooldowns.CompareAndDelete(key, value)
-		} else if k.Model == routingModelName(k.Channel, param.ModelName) {
-			excluded = append(excluded, k.Channel)
 		}
 		return true
 	})
@@ -130,15 +141,24 @@ func SelectPolicyChannel(param *RetryParam, group string) (*model.Channel, bool,
 			continue
 		}
 		tagFilters := append(append([]dto.ChannelFilter{}, filters...), dto.ChannelFilter{Kind: dto.FilterChannelTag, ChannelTag: tag})
-		channel, err := model.GetRandomSatisfiedChannel(group, param.ModelName, 0, tagFilters)
-		if err != nil {
-			return nil, true, err
-		}
-		if channel != nil {
+		for {
+			channel, err := model.GetRandomSatisfiedChannel(group, param.ModelName, 0, tagFilters)
+			if err != nil {
+				return nil, true, err
+			}
+			if channel == nil {
+				break
+			}
 			if ok, _ := model.ChannelSatisfiesFilters(channel, param.ModelName, tagFilters); !ok {
 				return nil, true, fmt.Errorf("routing candidate did not satisfy policy constraints")
 			}
+			key, mappingErr := routingAccountKey(channel, param.ModelName)
+			if mappingErr != nil || usedResources[key.Resource] || routingAccountCooling(channel, param.ModelName, now) {
+				tagFilters = append(tagFilters, dto.ChannelFilter{Kind: dto.FilterExcludedChannels, ExcludedChannelIDs: []int{channel.Id}})
+				continue
+			}
 			candidates = append(candidates, channel)
+			break
 		}
 	}
 	if len(candidates) == 0 {
@@ -167,27 +187,94 @@ func RoutingAffinityAllowed(c *gin.Context, preferred *model.Channel, modelName,
 	if err != nil || candidate == nil || preferred == nil || candidate.Tag == nil || preferred.Tag == nil || *candidate.Tag != *preferred.Tag {
 		return false
 	}
-	if until, ok := routingCooldowns.Load(routingCooldownKey{preferred.Id, routingModelName(preferred.Id, modelName)}); ok && until.(time.Time).After(time.Now()) {
+	key, mappingErr := routingAccountKey(preferred, modelName)
+	if mappingErr != nil || routingAccountCooling(preferred, modelName, time.Now()) {
 		return false
+	}
+	for _, idText := range c.GetStringSlice("use_channel") {
+		id, err := strconv.Atoi(idText)
+		if err != nil {
+			continue
+		}
+		channel, err := model.CacheGetChannel(id)
+		if err == nil {
+			usedKey, _ := routingAccountKey(channel, modelName)
+			if usedKey.Resource == key.Resource {
+				return false
+			}
+		}
 	}
 	return true
 }
 
-// Aliases for the same upstream model share cooldowns without coupling unrelated
-// models on a multi-model provider channel.
-func routingModelName(channelID int, name string) string {
-	channel, err := model.CacheGetChannel(channelID)
-	if err != nil || channel.ModelMapping == nil || *channel.ModelMapping == "" {
-		return name
+func routingAccountCooling(channel *model.Channel, name string, now time.Time) bool {
+	key, err := routingAccountKey(channel, name)
+	if err != nil {
+		return true
+	}
+	if key.Model == "" {
+		key.Model, err = routingMappedModelName(channel, name)
+		if err != nil {
+			return true
+		}
+	}
+	if until, ok := routingCooldowns.Load(key); ok && until.(time.Time).After(now) {
+		return true
+	}
+	// Honor an account-wide failure even when an alias declares model scope.
+	if until, ok := routingCooldowns.Load(routingCooldownKey{Resource: key.Resource}); ok && until.(time.Time).After(now) {
+		return true
+	}
+	return false
+}
+
+// routingAccountKey keeps explicit account aliases together while preserving
+// channel isolation when no administrator account identity was configured.
+func routingAccountKey(channel *model.Channel, name string) (routingCooldownKey, error) {
+	key := routingCooldownKey{Resource: fmt.Sprintf("channel:%d", channel.Id)}
+	settings := channel.GetSetting().ProtocolRouting
+	if settings != nil && settings.Enabled && settings.AccountResource != "" {
+		key.Resource = "account:" + settings.AccountResource
+	}
+	mapped, err := routingMappedModelName(channel, name)
+	if err != nil {
+		return key, err
+	}
+	key.Model = mapped
+	if settings != nil && settings.Enabled && settings.QuotaScope == "account" {
+		key.Model = ""
+	}
+	return key, nil
+}
+
+// Match relay/helper.ModelMappedHelper's chain, suffix fallback, and terminal
+// self-map semantics. This resolves cooldown identity only; it never rewrites a
+// request or substitutes a model when the administrator supplied no mapping.
+func routingMappedModelName(channel *model.Channel, name string) (string, error) {
+	if channel.ModelMapping == nil || *channel.ModelMapping == "" {
+		return name, nil
 	}
 	var mapping map[string]string
 	if common.UnmarshalJsonStr(*channel.ModelMapping, &mapping) != nil {
-		return name
+		return "", fmt.Errorf("invalid routing model mapping")
 	}
-	if mapped := mapping[name]; mapped != "" {
-		return mapped
+	current := name
+	visited := map[string]bool{current: true}
+	for {
+		mapped, exists := mapping[current]
+		base := hostreasoning.BaseModelName(current)
+		if (!exists || mapped == "") && base != current {
+			mapped, exists = mapping[base]
+		}
+		if !exists || mapped == "" || mapped == current {
+			return current, nil
+		}
+		if visited[mapped] {
+			return "", fmt.Errorf("routing model mapping contains a cycle")
+		}
+		visited[mapped] = true
+		current = mapped
 	}
-	return name
 }
 
 // RoutingAttemptLimit is an absolute request budget, including the initial

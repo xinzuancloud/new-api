@@ -278,3 +278,141 @@ func requireOrderedSubstrings(t *testing.T, s string, parts ...string) {
 		offset += idx + len(part)
 	}
 }
+
+func TestConvertedStreamsPreservePartialUsageOnFailure(t *testing.T) {
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	for _, toResponses := range []bool{false, true} {
+		for _, failure := range []string{"upstream", "malformed", "truncated"} {
+			name := "responses_to_chat/" + failure
+			if toResponses {
+				name = "chat_to_responses/" + failure
+			}
+			t.Run(name, func(t *testing.T) {
+				frames := []string{
+					`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-test","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5,"input_tokens_details":{"cached_tokens":1}}}}`,
+					`data: {"type":"response.output_text.delta","delta":"partial"}`,
+				}
+				upstreamError := `data: {"type":"response.failed","response":{"error":{"type":"server_error","message":"upstream failed"},"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5,"input_tokens_details":{"cached_tokens":1}}}}`
+				if toResponses {
+					frames = []string{`data: {"id":"chat_1","model":"gpt-test","choices":[{"index":0,"delta":{"content":"partial"}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5,"prompt_tokens_details":{"cached_tokens":1}}}`}
+					upstreamError = `data: {"error":{"type":"server_error","message":"upstream failed"}}`
+				}
+				switch failure {
+				case "upstream":
+					if !toResponses {
+						frames[0] = `data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-test"}}`
+					}
+					frames = append(frames, upstreamError)
+				case "malformed":
+					frames = append(frames, `data: {bad json`)
+				}
+				c, recorder, resp, info := newResponsesChatTestContext(t, strings.Join(frames, "\n\n")+"\n\n", true)
+				c.Set("protocol_route", map[string]any{"source": "fixture"})
+				var usage *dto.Usage
+				var apiErr *types.NewAPIError
+				if toResponses {
+					info.RelayFormat = types.RelayFormatOpenAIResponses
+					usage, apiErr = OaiChatToResponsesStreamHandler(c, info, resp)
+				} else {
+					usage, apiErr = OaiResponsesToChatStreamHandler(c, info, resp)
+				}
+				assert.NotNil(t, apiErr)
+				require.NotNil(t, usage)
+				assert.Equal(t, 2, usage.PromptTokens)
+				assert.Equal(t, 3, usage.CompletionTokens)
+				assert.Equal(t, 5, usage.TotalTokens)
+				assert.Equal(t, 1, usage.PromptTokensDetails.CachedTokens)
+				require.NotNil(t, info.StreamStatus)
+				assert.False(t, info.StreamStatus.IsSuccessful())
+				assert.True(t, info.StreamStatus.HasErrors())
+				output := recorder.Body.String()
+				assert.Contains(t, output, "partial")
+				assert.NotContains(t, output, "response.completed")
+				assert.NotContains(t, output, `"finish_reason":"stop"`)
+				assert.NotContains(t, output, "[DONE]")
+				if toResponses {
+					assert.Equal(t, 1, strings.Count(output, "event: response.failed\n"))
+					assert.True(t, c.GetBool("protocol_stream_error_written"))
+				} else {
+					assert.False(t, c.GetBool("protocol_stream_error_written"))
+				}
+			})
+		}
+	}
+}
+
+func TestConvertedStreamsEstimateUsageForUnbilledPartialOutput(t *testing.T) {
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+	for _, toResponses := range []bool{false, true} {
+		body := "data: " + `{"type":"response.output_text.delta","delta":"some partial output"}` + "\n\n"
+		if toResponses {
+			body = "data: " + `{"model":"gpt-test","choices":[{"index":0,"delta":{"content":"some partial output"}}]}` + "\n\n"
+		}
+		c, recorder, resp, info := newResponsesChatTestContext(t, body, true)
+		info.SetEstimatePromptTokens(11)
+		var usage *dto.Usage
+		var apiErr *types.NewAPIError
+		if toResponses {
+			usage, apiErr = OaiChatToResponsesStreamHandler(c, info, resp)
+		} else {
+			usage, apiErr = OaiResponsesToChatStreamHandler(c, info, resp)
+		}
+		require.NotNil(t, apiErr)
+		require.NotNil(t, usage)
+		assert.Equal(t, 11, usage.PromptTokens)
+		assert.Positive(t, usage.CompletionTokens)
+		assert.Contains(t, recorder.Body.String(), "some partial output")
+		assert.False(t, info.StreamStatus.IsSuccessful())
+		assert.False(t, c.GetBool("protocol_stream_error_written"), "unconfigured routes do not set protocol routing markers")
+	}
+}
+
+func TestOpenAIStreamFailureDoesNotCompleteClaudeResponse(t *testing.T) {
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+	for _, ending := range []string{"error", "eof", "legacy_eof", "done", "finish", "empty_done"} {
+		t.Run(ending, func(t *testing.T) {
+			body := "data: " + `{"id":"chat_1","model":"gpt-test","choices":[{"index":0,"delta":{"content":"partial"}}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_tokens_details":{"cached_tokens":20}}}` + "\n\n"
+			switch ending {
+			case "error":
+				body += "data: " + `{"error":{"type":"server_error","message":"synthetic partial upstream failure"}}` + "\n\n"
+			case "done":
+				body += "data: [DONE]\n\n"
+			case "finish":
+				body += "data: " + `{"id":"chat_1","model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"
+			case "empty_done":
+				body = "data: [DONE]\n\n"
+			}
+			c, recorder, resp, info := newResponsesChatTestContext(t, body, true)
+			info.RelayFormat = types.RelayFormatClaude
+			info.EnsureClaudeConvertInfo()
+			if ending != "legacy_eof" {
+				c.Set("protocol_route", map[string]any{"source": "fixture"})
+			}
+			usage, apiErr := OaiStreamHandler(c, info, resp)
+			if ending == "legacy_eof" || ending == "done" || ending == "finish" {
+				assert.Nil(t, apiErr)
+				return
+			}
+			assert.NotNil(t, apiErr)
+			assert.False(t, info.StreamStatus.IsSuccessful())
+			output := recorder.Body.String()
+			assert.NotContains(t, output, "event: message_stop\n")
+			assert.NotContains(t, output, `"stop_reason":"end_turn"`)
+			if ending != "empty_done" {
+				require.NotNil(t, usage)
+				assert.Equal(t, 100, usage.PromptTokens)
+				assert.Equal(t, 10, usage.CompletionTokens)
+				assert.Equal(t, 20, usage.PromptTokensDetails.CachedTokens)
+				assert.Contains(t, output, "partial")
+				assert.Equal(t, 1, strings.Count(output, "event: message_start\n"))
+			}
+		})
+	}
+}

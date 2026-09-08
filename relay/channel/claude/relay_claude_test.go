@@ -1,15 +1,19 @@
 package claude
 
 import (
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -399,4 +403,64 @@ func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48ThinkingUsesAdaptiveHighE
 	require.Nil(t, claudeRequest.Temperature)
 	require.Nil(t, claudeRequest.TopP)
 	require.Nil(t, claudeRequest.TopK)
+}
+
+func TestClaudeStreamFailureRetainsReportedBillingUsage(t *testing.T) {
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+	for _, clientFormat := range []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses} {
+		for _, ending := range []string{"error", "eof", "legacy_eof", "message_stop"} {
+			t.Run(string(clientFormat)+"/"+ending, func(t *testing.T) {
+				frames := []string{
+					`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test","role":"assistant","usage":{"input_tokens":100,"cache_read_input_tokens":20}}}`,
+					`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+					`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`,
+					`data: {"type":"message_delta","delta":{},"usage":{"output_tokens":10}}`,
+					`data: {"type":"error","error":{"type":"overloaded_error","message":"synthetic partial upstream failure"}}`,
+				}
+				if ending != "error" {
+					frames = frames[:len(frames)-1]
+				}
+				if ending == "message_stop" {
+					frames = append(frames, `data: {"type":"message_stop"}`)
+				}
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				if ending != "legacy_eof" {
+					c.Set("protocol_route", map[string]any{"source": "fixture"})
+				}
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+				info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "claude-test"}, RelayFormat: clientFormat, IsStream: true, DisablePing: true}
+				resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(strings.Join(frames, "\n\n") + "\n\n"))}
+				var usage *dto.Usage
+				var apiErr *types.NewAPIError
+				if clientFormat == types.RelayFormatOpenAIResponses {
+					usage, apiErr = ClaudeResponsesStreamHandler(c, resp, info)
+				} else {
+					usage, apiErr = ClaudeStreamHandler(c, resp, info)
+				}
+				if ending == "legacy_eof" || ending == "message_stop" {
+					assert.Nil(t, apiErr)
+					return
+				}
+				require.NotNil(t, apiErr)
+				require.NotNil(t, usage)
+				assert.Equal(t, 100, usage.PromptTokens)
+				assert.Equal(t, 10, usage.CompletionTokens)
+				assert.Equal(t, 20, usage.PromptTokensDetails.CachedTokens)
+				require.NotNil(t, usage.BillingUsage)
+				assert.False(t, info.StreamStatus.IsSuccessful())
+				assert.Contains(t, recorder.Body.String(), "partial")
+				assert.NotContains(t, recorder.Body.String(), "[DONE]")
+				assert.NotContains(t, recorder.Body.String(), "response.completed")
+				if clientFormat == types.RelayFormatOpenAIResponses {
+					assert.Equal(t, 1, strings.Count(recorder.Body.String(), "event: response.failed\n"))
+					assert.True(t, c.GetBool("protocol_stream_error_written"))
+				}
+
+			})
+		}
+
+	}
 }

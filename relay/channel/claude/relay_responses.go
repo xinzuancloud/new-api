@@ -16,7 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
+func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage *dto.Usage, apiErr *types.NewAPIError) {
 	responseID := helper.GetResponseID(c)
 	created := common.GetTimestamp()
 	state, err := relayconvert.NewResponseStreamState(types.RelayFormatClaude, types.RelayFormatOpenAIResponses, relayconvert.ResponseStreamOptions{
@@ -38,9 +38,21 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 		Usage:        &dto.Usage{},
 	}
 	var streamErr *types.NewAPIError
+	var sawMessageStop bool
+	route, routeExists := c.Get("protocol_route")
+	protocolRouting := routeExists && route != nil
+	defer func() {
+		if protocolRouting && apiErr != nil {
+			finalizeClaudeStreamUsage(c, info, claudeInfo)
+			usage = claudeInfo.Usage
+			if info.StreamStatus != nil && !info.StreamStatus.HasErrors() {
+				info.StreamStatus.RecordError(apiErr.Error())
+			}
+		}
+	}()
 	// streamFailed means a Responses-native terminal error was sent successfully.
-	// In that case the scanner stops without a transport error and the partial
-	// upstream usage remains billable.
+	// Legacy routing treats that event as handled; configured routing also returns
+	// an error while preserving partial usage for settlement.
 	streamFailed := false
 
 	sendResponsesEvent := func(eventType string, payload dto.ResponsesStreamResponse) bool {
@@ -53,6 +65,9 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 		if err := helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: eventType}, string(data)); err != nil {
 			streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
 			return false
+		}
+		if protocolRouting && eventType == "response.failed" {
+			c.Set("protocol_stream_error_written", true)
 		}
 		return true
 	}
@@ -69,6 +84,9 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 		return sendResponsesEvent(event.Type, event.Payload)
 	}
 	failResponsesStream := func(err error) bool {
+		if protocolRouting && streamErr == nil {
+			streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusBadGateway)
+		}
 		failureResults, handled := state.FailResponsesStream("server_error", err.Error(), "")
 		if !handled {
 			return false
@@ -87,8 +105,8 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 		if err := common.UnmarshalJsonStr(data, &claudeResponse); err != nil {
 			logger.LogError(c, "failed to unmarshal Claude stream event: "+err.Error())
 			if failResponsesStream(err) {
-				// A nil streamErr here is intentional: the protocol-level failure
-				// event was delivered, so only the scanner needs to stop.
+				// Legacy routing keeps its protocol-level failure behavior; configured
+				// routes also return the error for partial settlement and diagnostics.
 				sr.Stop(streamErr)
 				return
 			}
@@ -97,6 +115,9 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 			return
 		}
 		if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
+			if protocolRouting {
+				streamErr = types.WithClaudeError(*claudeError, http.StatusBadGateway)
+			}
 			if failResponsesStream(fmt.Errorf("%s", claudeError.Message)) {
 				sr.Stop(streamErr)
 				return
@@ -106,6 +127,9 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 			return
 		}
 
+		if claudeResponse.Type == "message_stop" {
+			sawMessageStop = true
+		}
 		if claudeResponse.StopReason != "" {
 			maybeMarkClaudeRefusal(c, claudeResponse.StopReason)
 		}
@@ -154,6 +178,19 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 			}
 		}
 	})
+	if protocolRouting && streamErr == nil {
+		if !info.StreamStatus.IsSuccessful() {
+			streamErr = types.NewOpenAIError(fmt.Errorf("upstream Claude stream interrupted: %s", info.StreamStatus.EndReason), types.ErrorCodeBadResponse, http.StatusBadGateway)
+		} else if !sawMessageStop {
+			streamErr = types.NewOpenAIError(fmt.Errorf("upstream Claude stream ended without message_stop"), types.ErrorCodeBadResponse, http.StatusBadGateway)
+		}
+		if streamErr != nil {
+			finalizeClaudeStreamUsage(c, info, claudeInfo)
+			openAIUsage := buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)
+			state.SetUsage(&openAIUsage)
+			failResponsesStream(streamErr)
+		}
+	}
 	if streamErr != nil {
 		return nil, streamErr
 	}

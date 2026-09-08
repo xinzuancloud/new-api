@@ -19,6 +19,9 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  'Account resource must be a trimmed identifier of at most 128 bytes',
+  'Invalid protocol policy: check formats, endpoint paths, features, verification, and loss policy',
+  'Model overrides must map upstream model names to complete protocol policies',
   'Account deletion',
   // Model management and metadata synchronization
   'Model management',

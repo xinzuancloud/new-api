@@ -37,6 +37,7 @@ import {
   stringifyAdvancedCustomConfig,
   validateAdvancedCustomConfig,
 } from './advanced-custom'
+import { validateProtocolPolicyJSON } from './protocol-routing'
 
 // ============================================================================
 // Form Validation Schema
@@ -255,6 +256,21 @@ export const channelFormSchema = z
     batch_add_set_key_prefix_2_name: z.boolean().optional(),
     key_mode: z.enum(['append', 'replace']).optional(), // For editing multi-key channels
     // Channel extra settings (stored in setting JSON, not sent directly)
+    protocol_routing_enabled: z.boolean().optional(),
+    protocol_routing_account_resource: z
+      .string()
+      .optional()
+      .refine(
+        (value) =>
+          !value ||
+          (new TextEncoder().encode(value).length <= 128 &&
+            value === value.trim() &&
+            !/[\p{Cc}]/u.test(value)),
+        'Account resource must be a trimmed identifier of at most 128 bytes'
+      ),
+    protocol_routing_quota_scope: z.enum(['model', 'account']).optional(),
+    protocol_routing_defaults: z.string().optional(),
+    protocol_routing_models: z.string().optional(),
     force_format: z.boolean().optional(),
     thinking_to_content: z.boolean().optional(),
     proxy: z
@@ -286,6 +302,35 @@ export const channelFormSchema = z
     upstream_model_update_ignored_models: z.string().optional(),
   })
   .superRefine((data, ctx) => {
+    if (
+      data.protocol_routing_enabled ||
+      data.protocol_routing_defaults?.trim()
+    ) {
+      if (
+        !validateProtocolPolicyJSON(
+          data.protocol_routing_defaults,
+          false,
+          !data.protocol_routing_enabled
+        )
+      ) {
+        addRequiredIssue(
+          ctx,
+          'protocol_routing_defaults',
+          'Invalid protocol policy: check formats, endpoint paths, features, verification, and loss policy'
+        )
+      }
+    }
+    if (data.protocol_routing_enabled || data.protocol_routing_models?.trim()) {
+      if (
+        !validateProtocolPolicyJSON(data.protocol_routing_models || '{}', true)
+      ) {
+        addRequiredIssue(
+          ctx,
+          'protocol_routing_models',
+          'Model overrides must map upstream model names to complete protocol policies'
+        )
+      }
+    }
     if (
       [3, 8, 36, 45, CHANNEL_TYPE_NEW_API, CHANNEL_TYPE_TASK_PLUGIN].includes(
         data.type
@@ -439,6 +484,11 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   batch_add_set_key_prefix_2_name: false,
   key_mode: 'append',
   // Channel extra settings
+  protocol_routing_enabled: false,
+  protocol_routing_account_resource: '',
+  protocol_routing_quota_scope: 'model',
+  protocol_routing_defaults: '',
+  protocol_routing_models: '',
   force_format: false,
   thinking_to_content: false,
   proxy: '',
@@ -480,6 +530,11 @@ export function transformChannelToFormDefaults(
   // Parse channel extra settings from setting field
   let extraSettings = {
     task_plugin_key: '',
+    protocol_routing_enabled: false,
+    protocol_routing_account_resource: '',
+    protocol_routing_quota_scope: 'model' as 'model' | 'account',
+    protocol_routing_defaults: '',
+    protocol_routing_models: '',
     force_format: false,
     thinking_to_content: false,
     proxy: '',
@@ -499,6 +554,17 @@ export function transformChannelToFormDefaults(
       )
       extraSettings = {
         task_plugin_key: parsed.task_plugin_key || '',
+        protocol_routing_enabled: parsed.protocol_routing?.enabled === true,
+        protocol_routing_account_resource:
+          parsed.protocol_routing?.account_resource || '',
+        protocol_routing_quota_scope:
+          parsed.protocol_routing?.quota_scope || 'model',
+        protocol_routing_defaults: parsed.protocol_routing?.defaults
+          ? JSON.stringify(parsed.protocol_routing.defaults, null, 2)
+          : '',
+        protocol_routing_models: parsed.protocol_routing?.models
+          ? JSON.stringify(parsed.protocol_routing.models, null, 2)
+          : '',
         force_format: parsed.force_format || false,
         thinking_to_content: parsed.thinking_to_content || false,
         proxy: parsed.proxy || '',
@@ -617,7 +683,11 @@ export function transformChannelToFormDefaults(
  * Build the setting JSON string from form extra settings
  */
 export function buildSettingJSON(formData: ChannelFormValues): string {
+  const existingSettings: Record<string, unknown> = formData.setting?.trim()
+    ? JSON.parse(formData.setting)
+    : {}
   const settingObj: Record<string, unknown> = {
+    ...existingSettings,
     task_plugin_key:
       formData.type === CHANNEL_TYPE_TASK_PLUGIN
         ? formData.task_plugin_key?.trim() || ''
@@ -630,6 +700,21 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     system_prompt_override: formData.system_prompt_override || false,
   }
 
+  if (
+    formData.protocol_routing_enabled ||
+    formData.protocol_routing_defaults?.trim() ||
+    existingSettings.protocol_routing !== undefined
+  ) {
+    settingObj.protocol_routing = {
+      enabled: formData.protocol_routing_enabled === true,
+      account_resource: formData.protocol_routing_account_resource || '',
+      quota_scope: formData.protocol_routing_quota_scope || 'model',
+      defaults: JSON.parse(formData.protocol_routing_defaults || '{}'),
+      models: JSON.parse(formData.protocol_routing_models || '{}'),
+    }
+  }
+  delete settingObj.http_protocol
+  delete settingObj.http2_connection_shards
   const protocol = normalizeHttpProtocol(formData.http_protocol)
   const shards =
     protocol === HTTP_PROTOCOL_HTTP1

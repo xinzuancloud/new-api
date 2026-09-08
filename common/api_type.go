@@ -105,3 +105,14 @@ func SupportsResponsesCompact(channelType, apiType int) bool {
 		return false
 	}
 }
+
+// SupportsProtocolRoutingChannelType identifies adapters whose authentication
+// does not depend on provider-specific request signing or URL construction.
+func SupportsProtocolRoutingChannelType(channelType int) bool {
+	switch channelType {
+	case constant.ChannelTypeOpenAI, constant.ChannelTypeAnthropic, constant.ChannelTypeMoonshot, constant.ChannelTypeVolcEngine:
+		return true
+	default:
+		return false
+	}
+}

@@ -11,6 +11,8 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
+	kittypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -243,7 +245,7 @@ func TestRoutingPolicyReservesFallbackAndExpiresCooldown(t *testing.T) {
 	require.NotNil(t, next)
 	assert.Equal(t, 3204, next.Id, "attempt cap skips free tier")
 	RecordRoutingFailure(ctx, 3204, "m", 429, "weekly quota")
-	key := routingCooldownKey{3204, "m"}
+	key := routingCooldownKey{"channel:3204", "m"}
 	expiry, _ := routingCooldowns.Load(key)
 	RecordRoutingFailure(ctx, 3204, "m", 429, "rate limit")
 	unchanged, _ := routingCooldowns.Load(key)
@@ -307,7 +309,7 @@ func TestRoutingPolicyExhaustsProviderAccountsBeforeFallback(t *testing.T) {
 				if skipUnavailable {
 					require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", 4101).Update("status", common.ChannelStatusAutoDisabled).Error)
 					require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ?", 4101).Update("enabled", false).Error)
-					routingCooldowns.Store(routingCooldownKey{4102, "m"}, time.Now().Add(time.Hour))
+					routingCooldowns.Store(routingCooldownKey{"channel:4102", "m"}, time.Now().Add(time.Hour))
 					expected = 10
 				}
 				model.InitChannelCache()
@@ -462,4 +464,135 @@ func TestRoutingPolicyKeepsLegacyFiniteAutoGroupRetry(t *testing.T) {
 	}
 	assert.Equal(t, []string{"vip", "vip", "default"}, groups)
 	assert.Zero(t, RoutingAttemptLimit(ctx), "old saved policies retain native cross-group retry behavior")
+}
+
+func TestRoutingPolicySharedAccountCooldownAndExclusion(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	original := operation_setting.RoutingPolicyJSON()
+	t.Cleanup(func() { require.NoError(t, operation_setting.UpdateRoutingPolicy(original)); routingCooldowns.Clear() })
+	require.NoError(t, operation_setting.UpdateRoutingPolicy(`{"enabled":true,"group_tag_order":{"team":["free","plan"]},"max_attempts_per_tag":0,"max_total_attempts":32,"rate_limit_cooldown_seconds":60,"quota_cooldown_seconds":3600,"quota_error_keywords":["weekly"],"request_timeout_seconds":300}`))
+	for _, id := range []int{5101, 5102, 5103, 5201} {
+		createChannelSelectAutoGroupsChannel(t, db, id, "team", "m")
+		tag := "free"
+		if id == 5201 {
+			tag = "plan"
+		}
+		require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", id).Update("tag", tag).Error)
+	}
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", 5101).Update("model_mapping", `{"m":"middle","middle":"upstream","public-alias":"middle"}`).Error)
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", 5102).Update("model_mapping", `{"m":"upstream"}`).Error)
+	for _, scope := range []string{"model", "account"} {
+		for _, cache := range []bool{false, true} {
+			t.Run(fmt.Sprintf("scope=%s/cache=%v", scope, cache), func(t *testing.T) {
+				routingCooldowns.Clear()
+				common.MemoryCacheEnabled = cache
+				raw := fmt.Sprintf(`{"protocol_routing":{"enabled":true,"account_resource":"supplier/account-a","quota_scope":%q,"defaults":{"entry_formats":["openai"],"endpoints":[{"format":"openai","path":"/v1/chat/completions","verified":true}]}}}`, scope)
+				require.NoError(t, db.Model(&model.Channel{}).Where("id IN ?", []int{5101, 5102}).Update("setting", raw).Error)
+				model.InitChannelCache()
+				ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+				ctx.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+				param := &RetryParam{Ctx: ctx, TokenGroup: "team", ModelName: "m"}
+				failedModel := "public-alias@effort:high"
+				if scope == "account" {
+					failedModel = "another-model"
+				}
+				if scope == "model" {
+					RecordRoutingFailure(ctx, 5101, "unrelated-model", 429, "weekly quota")
+					alias, err := model.CacheGetChannel(5102)
+					require.NoError(t, err)
+					assert.True(t, RoutingAffinityAllowed(ctx, alias, "m", "team"), "model scope leaves unrelated models healthy")
+					routingCooldowns.Clear()
+				}
+				RecordRoutingFailure(ctx, 5101, failedModel, 429, "weekly quota")
+				if scope == "model" {
+					// A differently scoped alias still honors this model's recorded failure.
+					aliasRaw := strings.Replace(raw, `"quota_scope":"model"`, `"quota_scope":"account"`, 1)
+					require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", 5102).Update("setting", aliasRaw).Error)
+					model.InitChannelCache()
+				}
+				selected, _, err := CacheGetRandomSatisfiedChannel(param)
+				require.NoError(t, err)
+				require.NotNil(t, selected)
+				assert.Equal(t, 5103, selected.Id, "cooldown covers account aliases but leaves a separate account eligible")
+				alias, err := model.CacheGetChannel(5102)
+				require.NoError(t, err)
+				assert.False(t, RoutingAffinityAllowed(ctx, alias, "m", "team"))
+				ctx.Set("use_channel", []string{"5103"})
+				selected, _, err = CacheGetRandomSatisfiedChannel(param)
+				require.NoError(t, err)
+				require.NotNil(t, selected)
+				assert.Equal(t, 5201, selected.Id, "supplier advances only once every distinct account is unavailable")
+				routingCooldowns.Clear()
+				ctx.Set("use_channel", []string{"5101"})
+				selected, _, err = CacheGetRandomSatisfiedChannel(param)
+				require.NoError(t, err)
+				require.NotNil(t, selected)
+				assert.Equal(t, 5103, selected.Id, "another endpoint alias is not another account attempt")
+				assert.False(t, RoutingAffinityAllowed(ctx, alias, "m", "team"), "affinity cannot revive an attempted account alias")
+			})
+		}
+	}
+	// Invalid mappings are not eligible routing candidates even with account scope.
+	routingCooldowns.Clear()
+	require.NoError(t, db.Model(&model.Channel{}).Where("id IN ?", []int{5101, 5102}).Update("model_mapping", `{"m":"private-cycle","private-cycle":"m"}`).Error)
+	model.InitChannelCache()
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	selected, _, err := CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: ctx, TokenGroup: "team", ModelName: "m"})
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, 5103, selected.Id)
+
+}
+
+func TestProtocolRoutingSettingsDatabasePersistence(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	versionQuery := "SELECT version()"
+	if db.Dialector.Name() == "sqlite" {
+		versionQuery = "SELECT sqlite_version()"
+	}
+	var version string
+	require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
+	t.Logf("protocol settings persistence database: %s %s", db.Dialector.Name(), version)
+
+	settings := kitdto.ChannelSettings{
+		Proxy: "http://127.0.0.1:7890", SystemPrompt: "Preserve this existing administrator prompt.",
+		ProtocolRouting: &kitdto.ProtocolRoutingSettings{
+			Enabled: true, AccountResource: "supplier/account-a", QuotaScope: "model",
+			Defaults: kitdto.ProtocolModelPolicy{
+				EntryFormats: []kittypes.RelayFormat{kittypes.RelayFormatOpenAI}, LossPolicy: "safe",
+				Endpoints: []kitdto.ProtocolEndpoint{{Format: kittypes.RelayFormatOpenAI, Path: "/v1/chat/completions", Features: []string{"stream", "tools", "images"}, Verified: true, VerifiedAt: "2026-09-08T12:34:56+08:00"}},
+			},
+			Models: map[string]kitdto.ProtocolModelPolicy{"provider/model-x": {
+				EntryFormats: []kittypes.RelayFormat{kittypes.RelayFormatClaude, kittypes.RelayFormatOpenAIResponses}, LossPolicy: "strict",
+				Endpoints: []kitdto.ProtocolEndpoint{{Format: kittypes.RelayFormatOpenAIResponses, Path: "/v1/responses", Features: []string{"stream", "tools"}, Verified: true, VerifiedAt: "2026-09-08T04:34:56Z"}},
+			}},
+		},
+	}
+	channel := model.Channel{Type: constant.ChannelTypeOpenAI, Key: "persistence-fixture-key", Name: "protocol-settings-persistence", Models: "public-model", Group: "team", Status: common.ChannelStatusEnabled}
+	channel.SetSetting(settings)
+	require.NoError(t, channel.ValidateSettings())
+	require.NoError(t, db.Create(&channel).Error)
+	var loaded model.Channel
+	require.NoError(t, db.First(&loaded, channel.Id).Error)
+	require.NoError(t, loaded.ValidateSettings())
+	assert.Equal(t, settings, loaded.GetSetting())
+
+	updated := loaded.GetSetting()
+	updated.ProtocolRouting.AccountResource = "supplier/account-b"
+	updated.ProtocolRouting.QuotaScope = "account"
+	updated.ProtocolRouting.Defaults.LossPolicy = "strict"
+	override := updated.ProtocolRouting.Models["provider/model-x"]
+	override.Endpoints[0].Path = "/vendor/v1/responses"
+	override.Endpoints[0].Features = append(override.Endpoints[0].Features, "structured_output")
+	updated.ProtocolRouting.Models["provider/model-x"] = override
+	loaded.SetSetting(updated)
+	require.NoError(t, loaded.ValidateSettings())
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", loaded.Id).Update("setting", loaded.Setting).Error)
+	var reloaded model.Channel
+	require.NoError(t, db.First(&reloaded, loaded.Id).Error)
+	require.NoError(t, reloaded.ValidateSettings())
+	actual := reloaded.GetSetting()
+	assert.Equal(t, updated, actual)
+	assert.Equal(t, settings.Proxy, actual.Proxy)
+	assert.Equal(t, settings.SystemPrompt, actual.SystemPrompt)
 }

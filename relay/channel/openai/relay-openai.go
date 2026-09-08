@@ -120,13 +120,45 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var secondLastStreamData string // 保留倒数第二个stream data；部分兼容网关把完整usage放在倒数第二个事件
 	seenStreamToolCalls := make(map[string]struct{})
 	var streamFunctionCallNames []string
+	var streamErr *types.NewAPIError
+	var lastStreamSent bool
+	var reportedUsageFrame string
+	var sawChunk, sawFinish bool
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		if lastStreamData != "" {
+			lastStreamSent = true
 			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
 				common.SysLog("error handling stream format: " + err.Error())
-				sr.Error(err)
+				streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusBadGateway)
+				sr.Stop(streamErr)
+				return
 			}
+		}
+		var frame dto.OpenAITextResponse
+		if err := common.UnmarshalJsonStr(data, &frame); err != nil {
+			streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+			sr.Stop(streamErr)
+			return
+		}
+		if len(frame.Choices) > 0 {
+			sawChunk = true
+		}
+		for _, choice := range frame.Choices {
+			switch choice.FinishReason {
+			case "stop", "length", "tool_calls", "function_call", "content_filter":
+				sawFinish = true
+			}
+		}
+		if service.ValidUsage(&frame.Usage) {
+			usage = dto.MergeUsageNonZero(usage, &frame.Usage)
+			containStreamUsage = true
+			reportedUsageFrame = data
+		}
+		if upstreamError := frame.GetOpenAIError(); upstreamError != nil && upstreamError.Type != "" {
+			streamErr = types.WithOpenAIError(*upstreamError, http.StatusBadGateway)
+			sr.Stop(streamErr)
+			return
 		}
 		if len(data) > 0 {
 			if lastStreamData != "" {
@@ -134,6 +166,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			}
 
 			lastStreamData = data
+			lastStreamSent = false
 			collectStreamFunctionCallNames(data, seenStreamToolCalls, &streamFunctionCallNames)
 			if err := processTokenData(info.RelayMode, data, &responseTextBuilder, &toolCount); err != nil {
 				logger.LogError(c, "error processing stream token data: "+err.Error())
@@ -141,6 +174,16 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			}
 		}
 	})
+
+	if streamErr == nil && !info.StreamStatus.IsSuccessful() {
+		streamErr = types.NewOpenAIError(fmt.Errorf("upstream chat stream interrupted: %s", info.StreamStatus.EndReason), types.ErrorCodeBadResponse, http.StatusBadGateway)
+	}
+
+	if route, exists := c.Get("protocol_route"); exists && route != nil && streamErr == nil {
+		if !sawChunk || (!sawFinish && info.StreamStatus.EndReason != relaycommon.StreamEndReasonDone) {
+			streamErr = types.NewOpenAIError(fmt.Errorf("upstream chat stream ended without a terminal event"), types.ErrorCodeBadResponse, http.StatusBadGateway)
+		}
+	}
 
 	// 处理最后的响应
 	shouldSendLastResp := true
@@ -152,6 +195,9 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	// 部分兼容网关把完整的累计usage附在倒数第二个事件上，随后发送一个空的最后事件。
 	// 仅当最后一个事件没有有效usage时，回退到倒数第二个事件的完整快照。
 	usageFrame := lastStreamData
+	if reportedUsageFrame != "" {
+		usageFrame = reportedUsageFrame
+	}
 	if !containStreamUsage && secondLastStreamData != "" {
 		var streamResp struct {
 			Usage *dto.Usage `json:"usage"`
@@ -173,7 +219,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	}
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
-		if shouldSendLastResp {
+		if shouldSendLastResp && !lastStreamSent {
 			_ = sendStreamData(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
 		}
 	}
@@ -189,6 +235,18 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		info.CountBillableToolCall(dto.BuildInCallFunctionCall, name)
 	}
 
+	if streamErr != nil {
+		if !lastStreamSent && lastStreamData != "" && info.RelayFormat != types.RelayFormatOpenAI {
+			// Preserve the final buffered content without synthesizing a success terminal.
+			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
+				info.StreamStatus.RecordError(err.Error())
+			}
+		}
+		if !info.StreamStatus.HasErrors() {
+			info.StreamStatus.RecordError(streamErr.Error())
+		}
+		return usage, streamErr
+	}
 	HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
 
 	return usage, nil
