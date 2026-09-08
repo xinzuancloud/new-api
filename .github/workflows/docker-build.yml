@@ -172,7 +172,7 @@ jobs:
             "$IMAGE:$TAG-arm64"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign version manifest
         run: cosign sign --yes "${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.tag }}"

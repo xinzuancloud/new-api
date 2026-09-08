@@ -16,6 +16,7 @@
 - The upstream repository is `QuantumNous/new-api`.
 - Merge upstream release tags with `git merge --no-ff --no-edit`; never force-push or overwrite an existing tag.
 - Fork Docker images publish to `ghcr.io/${{ github.repository }}`; official `calciumion/new-api` publishing must not be used by fork workflows.
+- The synchronizer requires repository secret `UPSTREAM_SYNC_TOKEN` with Contents, Actions, and Workflows write permissions because `GITHUB_TOKEN` cannot push tags pointing to workflow-file changes.
 - Main-branch validation builds Docker without pushing; formal release workflows publish only from explicit version tags.
 - Configuration-only workflow changes do not require production unit-test additions; verify YAML, shell syntax, workflow references, and available backend checks.
 
@@ -59,9 +60,11 @@ Run `git add AGENTS.md .github/UPSTREAM_RELEASE_WORKFLOW.md && git commit -m "do
 
 Use a six-hour cron plus `workflow_dispatch`. Grant `contents: write` and `actions: write`; use a concurrency group so two synchronizers cannot mutate `main` at once.
 
+Require `secrets.UPSTREAM_SYNC_TOKEN`, use it for the checkout/`origin` remote and `gh workflow run`, and fail with a clear error when it is absent.
+
 - [ ] **Step 2: Discover unprocessed releases**
 
-Use `gh api --paginate "repos/${UPSTREAM_REPOSITORY}/releases?per_page=100"` and `--jq` to select `.draft == false` and tags beginning with `v`, sort by published/created timestamp, and skip tags found by `git ls-remote origin refs/tags/<tag>`.
+Use `gh api --paginate "repos/${UPSTREAM_REPOSITORY}/releases?per_page=100"` and `--jq` to select `.draft == false` and tags beginning with `v`, sort by published/created timestamp, and select only the newest tag. A manual `tag` input may override this with one exact tag; never loop through the entire release history on a scheduled run.
 
 - [ ] **Step 3: Merge without overwriting fork code**
 
