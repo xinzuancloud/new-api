@@ -38,6 +38,35 @@ func TestProtocolCandidates(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestProtocolCapabilityDiagnostics(t *testing.T) {
+	policy := &dto.ProtocolRoutingSettings{Enabled: true, Defaults: dto.ProtocolModelPolicy{
+		EntryFormats: []types.RelayFormat{types.RelayFormatOpenAIResponses},
+		Endpoints: []dto.ProtocolEndpoint{
+			{Format: types.RelayFormatOpenAI, Path: "/private-endpoint", Verified: true, Features: []string{"tools"}},
+			{Format: types.RelayFormatClaude, Path: "/messages", Verified: true, Features: []string{"tools", "images"}},
+		},
+	}}
+	request := map[string]any{
+		"tools": []any{map[string]any{"type": "web_search", "description": "private tool text"}},
+		"input": []any{map[string]any{"type": "input_image", "image_url": "private image"}},
+	}
+	candidates, err := BuildProtocolCandidates(policy, "private-model", types.RelayFormatOpenAIResponses, request)
+	require.Error(t, err)
+	assert.Empty(t, candidates)
+	assert.EqualError(t, err, "no verified protocol endpoint supports the request capabilities; openai: missing capabilities: hosted_tools, images; claude: missing capabilities: hosted_tools")
+	assert.NotContains(t, err.Error(), "private")
+	policy.Defaults.Endpoints[1].Features = append(policy.Defaults.Endpoints[1].Features, "hosted_tools")
+	candidates, err = BuildProtocolCandidates(policy, "private-model", types.RelayFormatOpenAIResponses, request)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	assert.Equal(t, types.RelayFormat(types.RelayFormatClaude), candidates[0].Endpoint.Format)
+	for i := range policy.Defaults.Endpoints {
+		policy.Defaults.Endpoints[i].Verified = false
+	}
+	_, err = BuildProtocolCandidates(policy, "private-model", types.RelayFormatOpenAIResponses, request)
+	assert.EqualError(t, err, "no verified protocol endpoint supports the request capabilities; no endpoints are verified")
+}
+
 func TestProtocolSettingsValidation(t *testing.T) {
 	for _, path := range []string{"https://other.test/v1", "//other.test/v1", "/v1?api_key=secret", "/v1#fragment", "/v1/../secret", "/v1/%2e%2e/secret", "/v1\\secret", "/v1\nsecret"} {
 		t.Run(path, func(t *testing.T) {

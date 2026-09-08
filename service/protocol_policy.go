@@ -48,16 +48,24 @@ func BuildProtocolCandidates(settings *dto.ProtocolRoutingSettings, upstreamMode
 		loss = "safe"
 	}
 	candidates := make([]ProtocolCandidate, 0, len(policy.Endpoints))
+	rejections := make([]string, 0, len(policy.Endpoints))
 	for _, endpoint := range policy.Endpoints {
 		if !endpoint.Verified {
 			continue
 		}
-		if validateProtocolFeatures(endpoint, required) == nil {
-			candidates = append(candidates, ProtocolCandidate{Endpoint: endpoint, LossPolicy: loss})
+		if err := validateProtocolFeatures(endpoint, required); err != nil {
+			// Only validated format identifiers and canonical capability names are
+			// included: never expose request values or administrator endpoint paths.
+			rejections = append(rejections, fmt.Sprintf("%s: %s", endpoint.Format, err))
+			continue
 		}
+		candidates = append(candidates, ProtocolCandidate{Endpoint: endpoint, LossPolicy: loss})
 	}
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no verified protocol endpoint supports the request capabilities")
+		if len(rejections) == 0 {
+			rejections = append(rejections, "no endpoints are verified")
+		}
+		return nil, fmt.Errorf("no verified protocol endpoint supports the request capabilities; %s", strings.Join(rejections, "; "))
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		return candidates[i].Endpoint.Format == source && candidates[j].Endpoint.Format != source
@@ -88,10 +96,15 @@ func validateProtocolFeatures(endpoint dto.ProtocolEndpoint, required map[string
 	for _, feature := range endpoint.Features {
 		available[feature] = true
 	}
+	missing := make([]string, 0, len(required))
 	for feature := range required {
 		if !available[feature] {
-			return fmt.Errorf("protocol endpoint does not support the request capabilities")
+			missing = append(missing, feature)
 		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("missing capabilities: %s", strings.Join(missing, ", "))
 	}
 	return nil
 }
