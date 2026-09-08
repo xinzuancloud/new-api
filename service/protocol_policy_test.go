@@ -86,6 +86,7 @@ func TestProtocolEndpointCapabilitiesAfterOverrides(t *testing.T) {
 	for _, tc := range []struct{ name, feature, request string }{
 		{"stream", "stream", `{"stream":true}`},
 		{"message tools", "tools", `{"messages":[{"role":"user","content":"hi","tools":[{"type":"function","function":{"name":"f"}}]}]}`},
+		{"namespaced client tools", "tools", `{"tools":[{"type":"namespace","name":"client","tools":[{"type":"function","name":"run","parameters":{"type":"object","properties":{"tools":{"type":"array"}}}}]}]}`},
 		{"tool result", "tools", `{"messages":[{"role":"tool","content":"result"}]}`},
 		{"parallel tools", "parallel_tools", `{"parallel_tool_calls":true}`},
 		{"file", "files", `{"messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"f"}}]}]}`},
@@ -124,6 +125,17 @@ func TestProtocolEndpointCapabilitiesAfterOverrides(t *testing.T) {
 	}
 	require.NoError(t, ValidateProtocolEndpointFeatures(endpoint, endpoint.Format, &dto.GeneralOpenAIRequest{Model: "m"}))
 	require.Error(t, ValidateProtocolEndpointFeatures(endpoint, types.RelayFormatClaude, map[string]any{}))
+	var namespacedHosted map[string]any
+	require.NoError(t, common.UnmarshalJsonStr(`{"tools":[{"type":"namespace","name":"client","tools":[{"type":"web_search"}]}]}`, &namespacedHosted))
+	clientTools := dto.ProtocolEndpoint{Format: types.RelayFormatOpenAIResponses, Path: "/responses", Verified: true, Features: []string{"tools"}}
+	require.ErrorContains(t, ValidateProtocolEndpointFeatures(clientTools, clientTools.Format, namespacedHosted), "hosted_tools")
+	clientTools.Features = append(clientTools.Features, "hosted_tools")
+	require.NoError(t, ValidateProtocolEndpointFeatures(clientTools, clientTools.Format, namespacedHosted))
+	var nested any = map[string]any{"type": "function", "name": "run"}
+	for depth := 0; depth < 34; depth++ {
+		nested = map[string]any{"type": "namespace", "name": "client", "tools": []any{nested}}
+	}
+	require.ErrorContains(t, ValidateProtocolEndpointFeatures(clientTools, clientTools.Format, map[string]any{"tools": []any{nested}}), "unsupported_content")
 }
 
 func TestProtocolConversionRejectsSilentLoss(t *testing.T) {
@@ -137,6 +149,7 @@ func TestProtocolConversionRejectsSilentLoss(t *testing.T) {
 		{"chat logprobs", types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses, `{"logprobs":true,"top_logprobs":2}`, "logprobs"},
 		{"chat schema", types.RelayFormatOpenAI, types.RelayFormatClaude, `{"response_format":{"type":"json_schema","json_schema":{"name":"private"}}}`, "response_format"},
 		{"responses schema", types.RelayFormatOpenAIResponses, types.RelayFormatClaude, `{"text":{"format":{"type":"json_object"}}}`, "text"},
+		{"responses namespace conversion", types.RelayFormatOpenAIResponses, types.RelayFormatOpenAI, `{"tools":[{"type":"namespace","name":"private","tools":[{"type":"function","name":"run","parameters":{"type":"object"}}]}]}`, "tools"},
 		{"claude stop", types.RelayFormatClaude, types.RelayFormatOpenAIResponses, `{"stop_sequences":["private"]}`, "stop_sequences"},
 		{"claude schema", types.RelayFormatClaude, types.RelayFormatOpenAIResponses, `{"output_config":{"format":{"type":"json_schema"}}}`, "output_config"},
 		{"claude tool choice", types.RelayFormatClaude, types.RelayFormatOpenAI, `{"tool_choice":{"type":"any"}}`, "tool_choice"},

@@ -191,7 +191,7 @@ func protocolRequestFeatures(body map[string]any) map[string]bool {
 			}
 		}
 	}
-	inspectProtocolTools(body["tools"], required)
+	inspectProtocolTools(body["tools"], required, 0)
 	for _, key := range []string{"messages", "input", "system"} {
 		inspectProtocolContent(body[key], required, 0)
 	}
@@ -200,7 +200,11 @@ func protocolRequestFeatures(body map[string]any) map[string]bool {
 
 // inspectProtocolTools reads protocol fields only; arbitrary JSON schemas and
 // tool arguments may contain the same names and are deliberately left opaque.
-func inspectProtocolTools(value any, required map[string]bool) {
+func inspectProtocolTools(value any, required map[string]bool, depth int) {
+	if depth > 32 {
+		required["unsupported_content"] = true
+		return
+	}
 	tools, ok := value.([]any)
 	if !ok {
 		return
@@ -215,7 +219,12 @@ func inspectProtocolTools(value any, required map[string]bool) {
 			continue
 		}
 		kind, _ := spec["type"].(string)
-		if kind != "" && kind != "function" && kind != "custom" {
+		if kind == "namespace" {
+			// A namespace groups client functions/custom tools; it does not
+			// require provider-hosted execution. Inspect its declarations only,
+			// keeping schemas, arguments and descriptions opaque.
+			inspectProtocolTools(spec["tools"], required, depth+1)
+		} else if kind != "" && kind != "function" && kind != "custom" {
 			required["hosted_tools"] = true
 		}
 		if container, exists := spec["container"]; exists && protocolValuePresent(container) {
@@ -284,7 +293,7 @@ func inspectProtocolContent(value any, required map[string]bool, depth int) {
 		if v["role"] == "tool" || v["role"] == "function" || protocolValuePresent(v["tool_calls"]) || protocolValuePresent(v["function_call"]) {
 			required["tools"] = true
 		}
-		inspectProtocolTools(v["tools"], required)
+		inspectProtocolTools(v["tools"], required, depth+1)
 		if audio, ok := v["audio"].(map[string]any); ok {
 			required["audio"] = true
 			if protocolValuePresent(audio["id"]) {
