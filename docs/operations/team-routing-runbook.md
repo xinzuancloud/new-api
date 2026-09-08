@@ -99,11 +99,13 @@ Plus 的 Kimi 订阅白名单是 `kimi-for-coding`、`kimi-k3-256k`。Plus 火�
 
 | 供应商与模型 | 原生 Responses 路径（附加在当前 Base URL） | 本次验证与配置边界 |
 | --- | --- | --- |
-| Kimi 订阅四个现有模型 | `/responses` | 四个模型的普通函数调用均完成；K3 的 SSE、namespace、联网搜索完成。默认策略新增原生 Responses，映射后 `k3` 的覆盖策略额外声明 hosted_tools。 |
-| 火山 `kimi-k3` | `/v3/responses` | 基础请求、SSE、普通函数调用通过；联网与 namespace 探针未产生相应工具调用，未据 HTTP 200 宣称支持这些能力。仅为该映射模型新增覆盖策略。 |
+| Kimi 订阅四个现有模型 | `/responses` | 普通函数调用通过；四个型号在原生 Responses 和 Messages 下的联网搜索均验证成功。两个原生端点的默认策略及已有模型覆盖均登记 hosted_tools。K3 和 kimi-for-coding 的 namespace 调用另有网关验证。 |
+| 火山 `kimi-k3` | `/v3/responses` | 基础请求、SSE、普通函数调用通过；此 Responses 路径的联网与 namespace 探针未产生相应工具调用。该模型及 kimi-k3-256k 的原生 `/v1/messages` 则实际执行了 WebSearch，分别在模型覆盖中登记 Messages hosted_tools。 |
 | 天翼 `kimi-k3` | `/v1/responses` | 非流式返回合法的输出长度截断响应和用量；联网 SSE 探针超时，未声明 stream 或 hosted_tools。仍仅受原 VIP 权限控制。 |
-| SenseNova | `/v1/responses` | 当前入口返回 NOT_FOUND，保留已验证 Chat/Messages 路径；不据此断言供应商未来或其他入口永不支持。 |
+| SenseNova | `/v1/responses` | 当前入口返回 NOT_FOUND。对 kimi-k3 Messages 流式 WebSearch，12个独立Key账号均未返回有效搜索SSE事件，暂不声明这项能力；保留普通 Chat/Messages 路径，不据此断言未来或其他入口永不支持。 |
 
 [Kimi 官方 Codex 接入文档](https://www.kimi.com/code/docs/third-party-tools/codex.html)明确说明原生 Responses 和联网搜索。实测 `web_search` 可执行并正常完成；`web_search_preview` 以及测试中的强制 tool_choice 组合返回上游400，未静默改写工具或关闭用户功能。
 
 排查能力时区分协议入口、具体模型、工具类型和参数组合。先核实兼容的原生路径，再考虑转换；原生路径也不意味着该模型实现协议中的所有工具。后续监测结合 HTTP、stream_status、protocol_route 和实际工具调用，不能把工具声明存在或 HTTP 200 当作功能已执行。
+
+用户后续报告的 Claude WebSearch 错误来自 `/v1/messages`。仅登记 Responses 搜索不足以支持 Messages 搜索；原错误文本展示了最后一个候选端点的缺失项，不能把其中的 stream/tools 外推为所有供应商都缺这些能力。Kimi 原生 Messages 的 `web_search_20250305` 已实际返回 server_tool_use、搜索结果及正常 message_stop，现已补齐配置。Kimi 四型号×两种原生格式的搜索均已实测；火山 kimi-k3 返回正常搜索结果，kimi-k3-256k 返回10条结果后达到测试输出限额，不能把后者称为完整最终回答。修复使用既有UI可配置字段，无需继续改代码或重启应用。
