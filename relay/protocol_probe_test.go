@@ -97,6 +97,11 @@ func TestProtocolProbeTransportBoundaries(t *testing.T) {
 	cancel()
 	result = RunProtocolProbe(ctx, &upstream, test, 256)
 	assert.Equal(t, "cancelled", result.Outcome)
+	upstream.OtherSettings = "broken"
+	require.NotPanics(t, func() { result = RunProtocolProbe(context.Background(), &upstream, test, 256) })
+	assert.Equal(t, "configuration_unavailable", result.Reason)
+	assert.Equal(t, "broken", upstream.OtherSettings, "diagnostics must not repair persisted settings")
+
 }
 
 func TestProtocolProbeFingerprintTracksAccountSelection(t *testing.T) {

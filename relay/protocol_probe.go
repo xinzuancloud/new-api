@@ -41,6 +41,14 @@ func RunProtocolProbe(ctx context.Context, upstream *model.Channel, test model.P
 	if (dto.ProtocolModelPolicy{EntryFormats: []types.RelayFormat{test.Endpoint.Format}, Endpoints: []dto.ProtocolEndpoint{test.Endpoint}}).Validate() != nil {
 		return result
 	}
+	var otherSettings dto.ChannelOtherSettings
+	if upstream.OtherSettings != "" && common.UnmarshalJsonStr(upstream.OtherSettings, &otherSettings) != nil {
+		return result
+	}
+	headers := map[string]any{}
+	if upstream.HeaderOverride != nil && *upstream.HeaderOverride != "" && common.UnmarshalJsonStr(*upstream.HeaderOverride, &headers) != nil {
+		return result
+	}
 	body, stream, err := service.BuildProtocolProbeFixture(test.Endpoint.Format, test.Model, test.Check, maxTokens)
 	if err != nil {
 		return result
@@ -75,7 +83,7 @@ func RunProtocolProbe(ctx context.Context, upstream *model.Channel, test model.P
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, test.Endpoint.Path, bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
-	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelId: upstream.Id, ChannelType: upstream.Type, ChannelBaseUrl: upstream.GetBaseURL(), ApiType: apiType, ApiKey: key, UpstreamModelName: test.Model, ChannelSetting: settings, HeadersOverride: upstream.GetHeaderOverride(), ChannelOtherSettings: upstream.GetOtherSettings()}, OriginModelName: test.Model, RelayFormat: test.Endpoint.Format, FinalRequestRelayFormat: test.Endpoint.Format, RequestURLPath: test.Endpoint.Path, IsStream: stream, DisablePing: true, IsChannelTest: true, StartTime: started, RelayMode: relayconstant.RelayModeChatCompletions}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelId: upstream.Id, ChannelType: upstream.Type, ChannelBaseUrl: upstream.GetBaseURL(), ApiType: apiType, ApiKey: key, UpstreamModelName: test.Model, ChannelSetting: settings, HeadersOverride: headers, ChannelOtherSettings: otherSettings}, OriginModelName: test.Model, RelayFormat: test.Endpoint.Format, FinalRequestRelayFormat: test.Endpoint.Format, RequestURLPath: test.Endpoint.Path, IsStream: stream, DisablePing: true, IsChannelTest: true, StartTime: started, RelayMode: relayconstant.RelayModeChatCompletions}
 	if upstream.OpenAIOrganization != nil {
 		info.Organization = *upstream.OpenAIOrganization
 	}
