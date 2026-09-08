@@ -302,9 +302,15 @@ func updateOptionMap(key string, value string) (err error) {
 		return nil
 	}
 	if key == protocol_setting.OptionKey {
-		if err := protocol_setting.Update(value); err != nil {
+		// AllOption may have fetched this value before an administrator commit.
+		// Re-read under the same serialization as mutation/publication.
+		protocolCatalogMu.Lock()
+		defer protocolCatalogMu.Unlock()
+		catalog, err := ReadProtocolProfiles()
+		if err != nil {
 			return err
 		}
+		return publishProtocolProfiles(protocol_setting.JSON(catalog))
 	}
 	if key == retiredThemeOptionKey {
 		common.OptionMapRWMutex.Lock()

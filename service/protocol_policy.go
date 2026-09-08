@@ -193,8 +193,22 @@ func protocolRequestFeatures(body map[string]any) map[string]bool {
 		}
 	}
 	inspectProtocolTools(body["tools"], required, 0)
+	shellExecution := "unknown"
+	declaredTools, _ := body["tools"].([]any)
+	for _, raw := range declaredTools {
+		spec, _ := raw.(map[string]any)
+		if spec["type"] != "shell" {
+			continue
+		}
+		classified := ClassifyProtocolTool(spec)
+		if shellExecution != "unknown" && shellExecution != classified {
+			shellExecution = "unknown"
+			break
+		}
+		shellExecution = classified
+	}
 	for _, key := range []string{"messages", "input", "system"} {
-		inspectProtocolContent(body[key], required, 0)
+		inspectProtocolContent(body[key], required, 0, shellExecution)
 	}
 	return required
 }
@@ -263,7 +277,7 @@ func protocolValuePresent(value any) bool {
 
 // Inspect only protocol content containers, never tool schemas, metadata, or
 // strings containing user JSON. Unknown content fails closed.
-func inspectProtocolContent(value any, required map[string]bool, depth int) {
+func inspectProtocolContent(value any, required map[string]bool, depth int, shellExecution string) {
 	if depth > 32 {
 		required["unsupported_content"] = true
 		return
@@ -271,7 +285,7 @@ func inspectProtocolContent(value any, required map[string]bool, depth int) {
 	switch v := value.(type) {
 	case []any:
 		for _, item := range v {
-			inspectProtocolContent(item, required, depth+1)
+			inspectProtocolContent(item, required, depth+1, shellExecution)
 		}
 	case map[string]any:
 		kind, _ := v["type"].(string)
@@ -294,7 +308,11 @@ func inspectProtocolContent(value any, required map[string]bool, depth int) {
 			}
 		case "shell_call", "shell_call_output":
 			required["tools"] = true
-			required["unknown_tool_execution"] = true
+			if shellExecution == "server" {
+				required["hosted_tools"] = true
+			} else if shellExecution != "client" {
+				required["unknown_tool_execution"] = true
+			}
 		case "thinking", "redacted_thinking", "reasoning":
 			required["reasoning"] = true
 		case "item_reference":
@@ -334,7 +352,7 @@ func inspectProtocolContent(value any, required map[string]bool, depth int) {
 			required["reasoning"] = true
 		}
 		for _, key := range []string{"content", "output"} {
-			inspectProtocolContent(v[key], required, depth+1)
+			inspectProtocolContent(v[key], required, depth+1, shellExecution)
 		}
 	}
 }

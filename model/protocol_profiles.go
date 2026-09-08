@@ -81,6 +81,17 @@ func MutateProtocolProfiles(revision string, mutate func(*gorm.DB, protocol_sett
 			return e
 		}
 		for _, ch := range channels {
+			// Unparseable legacy JSON cannot supply a runtime profile binding.
+			// Read just the reference so unrelated invalid fields cannot hide a
+			// valid reference; bound channels still receive complete validation.
+			var reference struct {
+				Routing *struct {
+					Profile string `json:"profile"`
+				} `json:"protocol_routing"`
+			}
+			if ch.Setting == nil || common.UnmarshalJsonStr(*ch.Setting, &reference) != nil || reference.Routing == nil || reference.Routing.Profile == "" {
+				continue
+			}
 			if e = validateProtocolChannel(catalog, &ch); e != nil {
 				return fmt.Errorf("bound_channel_policy_invalid: channel %d", ch.Id)
 			}
@@ -93,11 +104,27 @@ func MutateProtocolProfiles(revision string, mutate func(*gorm.DB, protocol_sett
 	}
 	// Publishing stays inside the process mutex so a slower commit cannot replace
 	// a newer in-process snapshot. Other instances refresh via ordinary options sync.
-	if err = updateOptionMap(protocol_setting.OptionKey, value); err != nil {
+	if err = publishProtocolProfiles(value); err != nil {
 		return "", err
 	}
 	return next, nil
 }
+
+// publishProtocolProfiles requires protocolCatalogMu. It is used only after
+// a successful commit or a fresh database read under that mutex.
+func publishProtocolProfiles(value string) error {
+	if err := protocol_setting.Update(value); err != nil {
+		return err
+	}
+	common.OptionMapRWMutex.Lock()
+	defer common.OptionMapRWMutex.Unlock()
+	if common.OptionMap == nil {
+		common.OptionMap = map[string]string{}
+	}
+	common.OptionMap[protocol_setting.OptionKey] = value
+	return nil
+}
+
 func validateProtocolChannel(catalog protocol_setting.Catalog, channel *Channel) error {
 	settings, e := ProtocolChannelSettings(channel)
 	if e != nil {
@@ -164,6 +191,7 @@ func EffectiveProtocolSettings(catalog protocol_setting.Catalog, channel *Channe
 }
 
 type ProtocolChannelMetadata struct {
+	Diagnostic      string   `json:"diagnostic,omitempty"`
 	ID              int      `json:"id"`
 	Name            string   `json:"name"`
 	Type            int      `json:"type"`
@@ -183,13 +211,18 @@ func ListProtocolChannels() ([]ProtocolChannelMetadata, error) {
 	result := make([]ProtocolChannelMetadata, 0, len(channels))
 	for _, ch := range channels {
 		settings, e := ProtocolChannelSettings(&ch)
+		diagnostic := ""
 		if e != nil {
-			return nil, e
+			diagnostic = "invalid_channel_settings"
+			settings = dto.ChannelSettings{}
 		}
 		models := ch.GetModels()
 		mapped, e := ProtocolMappedModels(&ch)
 		if e != nil {
-			return nil, e
+			if diagnostic == "" {
+				diagnostic = "invalid_model_mapping"
+			}
+			mapped = []string{}
 		}
 
 		baseURL := ch.GetBaseURL()
@@ -205,7 +238,7 @@ func ListProtocolChannels() ([]ProtocolChannelMetadata, error) {
 			}
 		}
 
-		m := ProtocolChannelMetadata{ID: ch.Id, Name: ch.Name, Type: ch.Type, BaseURL: baseURL, Models: models, MappedModels: mapped}
+		m := ProtocolChannelMetadata{Diagnostic: diagnostic, ID: ch.Id, Name: ch.Name, Type: ch.Type, BaseURL: baseURL, Models: models, MappedModels: mapped}
 		if s := settings.ProtocolRouting; s != nil {
 			m.Profile = s.Profile
 			m.Enabled = s.Enabled

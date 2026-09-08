@@ -103,4 +103,15 @@ func TestProtocolProfilesTransactions(t *testing.T) {
 	require.NoError(t, db.First(&channel, channel.Id).Error)
 	assert.Equal(t, "broken", *channel.Setting)
 	assert.False(t, errors.Is(err, ErrProtocolConflict))
+	// A previously fetched refresh cannot revert a committed catalog.
+	stale := protocol_setting.JSON(protocol_setting.Catalog{})
+	next, err := UpdateProtocolProfiles(protocol_setting.Revision(protocol_setting.Catalog{}), catalog)
+	require.NoError(t, err, "unrelated malformed legacy settings must not block catalog edits")
+	require.NoError(t, updateOptionMap(protocol_setting.OptionKey, stale))
+	assert.Equal(t, next, protocol_setting.Revision(protocol_setting.Get()))
+	metadata, err = ListProtocolChannels()
+	require.NoError(t, err)
+	require.Len(t, metadata, 1)
+	assert.Equal(t, "invalid_channel_settings", metadata[0].Diagnostic)
+
 }

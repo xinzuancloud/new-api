@@ -293,3 +293,13 @@ func TestProtocolClientToolFamilies(t *testing.T) {
 		}
 	}
 }
+
+func TestProtocolShellContinuation(t *testing.T) {
+	endpoint := dto.ProtocolEndpoint{Format: types.RelayFormatOpenAIResponses, Path: "/v1/responses", Verified: true, Features: []string{"tools"}}
+	for _, kind := range []string{"shell_call", "shell_call_output"} {
+		request := map[string]any{"tools": []any{map[string]any{"type": "shell", "environment": map[string]any{"type": "local"}}}, "input": []any{map[string]any{"type": kind, "call_id": "call_1"}}}
+		require.NoError(t, ValidateProtocolEndpointFeatures(endpoint, endpoint.Format, request))
+		delete(request, "tools")
+		require.ErrorContains(t, ValidateProtocolEndpointFeatures(endpoint, endpoint.Format, request), "unknown_tool_execution")
+	}
+}
