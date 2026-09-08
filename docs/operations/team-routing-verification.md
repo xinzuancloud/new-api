@@ -163,3 +163,14 @@ CI34208542342 and GHCR34208850270 subsequently completed successfully; all four 
 - Live candidate request `202609081048245961493948268d9d6SdXNUTGz` returned200/end_turn,21 search results and no tool errors. Its sole consume log is native Claude→Claude, stream status ok, input10527/output40, quota20018, with exactly `web_search` count1 at the unchanged configured price10 per1000 calls. The21 hits were not billed as21 searches. Evidence `/opt/ops-backups/protocol-capability/gateway-claude-web-billing-probe.json`.
 - Final runtime `v1.0.0-rc.35-fork.20260908.t183941.g1e4b491ed36f`; binary SHA256 `e89972a91fd7a74388307c9033460fb7d54325d53cb089288cc6b5d282368c81` matched local/server, and the Linux binary version was checked with VERSION unset. Static binary was deployed on the existing local runtime base; frontend assets rebuilt for the tag. Public status and primary agree; four production containers are healthy/running, canary removed after no active API/upstream connections. Rollback metadata `/opt/ops-backups/protocol-search-billing-rollout/`; primary drained at least300 seconds before recreation, Caddy restored at1788865109.
 - CI34216637085, binaries34216909846, GHCR34216914032 and Electron34216918875 all succeeded. `billing-guard-before.json`/`billing-guard-after.json` match all configured pricing/ability/channel invariants. Monitoring gained readonly search_tool_charges aggregates, compiled successfully and returned the expected Kimi/Claude search count1, price10, incomplete0 on live PostgreSQL data. Its15-minute window initially contained no priced calls; the60-minute check included the candidate verification, so this proves monitoring integration rather than improved production workload statistics.
+
+
+### 2026-09-08 共享协议模板与批量验证
+
+与精确上游 v1.0.0-rc.36 合并。完整 Go 测试通过，RelayKit 独立 `GOWORK=off go build ./...` 通过；前端1058测试、类型检查、相关lint和生产构建通过。实际HTTP鉴权验证26个拒绝路径及18个安全Origin边界，并确认只读元数据无Key泄露、模板绑定和两项原生探测成功。真实浏览器另外完成目录保存、绑定预览/应用、3项报告创建/分批运行/结果应用，数据库确认报告持久化为applied。
+
+数据库版本：SQLite3.50.4、MySQL8.0.46、PostgreSQL15.18。`go test ./controller -run TestProtocolProbeWorkflow -count=1` 使用 `PROTOCOL_TEST_DIALECT`/`PROTOCOL_TEST_DSN` 分别连接三种真实引擎，验证并发独占领取、版本冲突、原子应用、解绑、结果保留与中断恢复。新建、部署rc35升级、上游rc36升级共9场景通过；真实InitDB/InitLogDB再次启动，数据/索引/约束保留且二次启动DDL为0。原始报告 `/private/tmp/protocol-profiles-migration/run-20260908-215111/results.json`。
+
+完整网关回归199检查通过，59条结算维持钱包和令牌守恒；搜索计费回归13场景通过。证据 `/private/tmp/protocol-e2e/run-20260908-215353` 和 `/private/tmp/protocol-profiles-rc36-billing-e2e.log`。现有39渠道整理为4个产品模板，3个模型差异；162个默认/映射/显式模型策略比较通过，除合并微秒差异的验证时间戳外，端点、顺序、能力、验证标志和损耗策略相同。原始验证时间戳留在部署快照。生产部署结果另记于下文。
+
+最终独立审查的三项P2已修复并复核通过：默认代表探测忽略无关损坏旧渠道；界面允许显式清空继承验证时间；解除绑定先读取最新已保存策略，读取失败保留绑定，普通渠道保存同步失效相关缓存。补充41项前端聚焦回归、类型/lint/构建以及三数据库探测工作流通过。
