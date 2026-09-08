@@ -83,6 +83,7 @@ export type Channel = z.infer<typeof channelSchema>
 
 export interface ChannelSettings {
   protocol_routing?: ProtocolRoutingSettings
+  task_plugin_key?: string
   force_format?: boolean
   thinking_to_content?: boolean
   proxy?: string
