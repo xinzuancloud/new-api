@@ -64,7 +64,8 @@ WITH native_empty_stream_requests AS (
 SELECT json_build_object('kind','native_empty_stream_retries','requests',count(*),
  'retry_attempts',coalesce(sum(retry_attempts),0),
  'completed_requests',count(*) FILTER(WHERE completed),
- 'error_only_requests',count(*) FILTER(WHERE NOT completed),
+ 'error_only_requests',count(*) FILTER(WHERE NOT completed AND NOT downstream_cancelled),
+ 'downstream_cancellation_requests',count(*) FILTER(WHERE downstream_cancelled),
  'upstream_incomplete_streams',count(*) FILTER(WHERE upstream_incomplete),
  'downstream_cancellations',count(*) FILTER(WHERE downstream_cancelled))
 FROM native_empty_stream_requests;
@@ -82,7 +83,8 @@ WITH auto_review_requests AS (
 SELECT json_build_object('kind','auto_review_correlation','requests',count(*),
  'completed_requests',count(*) FILTER(WHERE completed),
  'recovered_after_errors',count(*) FILTER(WHERE completed AND error_attempts>0),
- 'error_only_requests',count(*) FILTER(WHERE NOT completed),
+ 'error_only_requests',count(*) FILTER(WHERE NOT completed AND downstream_cancellations=0),
+ 'downstream_cancellation_requests',count(*) FILTER(WHERE NOT completed AND downstream_cancellations>0),
  'error_attempts',sum(error_attempts),'upstream_incomplete_streams',sum(upstream_incomplete_streams),
  'downstream_cancellations',sum(downstream_cancellations))
 FROM auto_review_requests;
