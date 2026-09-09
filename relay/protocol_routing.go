@@ -295,6 +295,7 @@ func sendProtocolRequest(c *gin.Context, info *relaycommon.RelayInfo, plan *Prep
 		usage, apiErr := sendProtocolRequestAttempt(c, info, plan, adaptor)
 		if attempt == 0 && apiErr != nil && info.ReceivedResponseCount == 0 && !c.Writer.Written() && c.Request.Context().Err() == nil && info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonEOF {
 			logger.LogWarn(c, "empty native Claude stream; retrying the same endpoint once")
+			common.SetContextKey(c, constant.ContextKeyProtocolNativeEmptyStreamRetries, common.GetContextKeyInt(c, constant.ContextKeyProtocolNativeEmptyStreamRetries)+1)
 			info.StreamStatus = nil
 			service.ResetClaudeWebSearchBilling(c)
 			continue

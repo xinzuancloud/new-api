@@ -27,6 +27,22 @@ SELECT json_build_object('kind','attempts','channel',channel_id,'type',type,'cou
 WITH requests AS(SELECT request_id,bool_or(type=2) AS consumed,count(*) FILTER(WHERE type=5) AS errors FROM logs l WHERE type IN(2,5) AND request_id<>'' AND created_at BETWEEN {start} AND {end} GROUP BY request_id) SELECT json_build_object('kind','correlation','requests',count(*),'recovered_after_errors',count(*) FILTER(WHERE consumed AND errors>0),'error_only_requests',count(*) FILTER(WHERE NOT consumed),'error_attempts',sum(errors)) FROM requests;
 SELECT json_build_object('kind','stream_end','reason',nullif(l.other,'')::jsonb#>>'{{stream_status,end_reason}}','count',count(*)) FROM logs l WHERE l.type=2 AND is_stream AND created_at BETWEEN {start} AND {end} GROUP BY 2;
 SELECT json_build_object('kind','protocol_routes','source',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}','target',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}','requests',count(*),'incomplete_streams',count(*) FILTER(WHERE nullif(l.other,'')::jsonb#>>'{{stream_status,status}}'='error'),'skipped_candidates',sum(CASE WHEN jsonb_typeof(nullif(l.other,'')::jsonb#>'{{admin_info,protocol_skips}}')='array' THEN jsonb_array_length(nullif(l.other,'')::jsonb#>'{{admin_info,protocol_skips}}') ELSE 0 END)) FROM logs l WHERE l.type=2 AND created_at BETWEEN {start} AND {end} AND nullif(l.other,'')::jsonb#>'{{admin_info,protocol_route}}' IS NOT NULL GROUP BY nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}';
+WITH native_empty_stream_requests AS (
+ SELECT request_id,
+  max((nullif(other,'')::jsonb#>>'{{admin_info,protocol_native_empty_stream_retries}}')::integer) AS retry_attempts,
+  bool_or(type=2) AS completed,
+  bool_or(type=2 AND nullif(other,'')::jsonb#>>'{{stream_status,status}}'='error') AS incomplete
+ FROM logs
+ WHERE type IN(2,5) AND request_id<>'' AND created_at BETWEEN {start} AND {end}
+  AND nullif(other,'')::jsonb#>>'{{admin_info,protocol_native_empty_stream_retries}}' IS NOT NULL
+ GROUP BY request_id
+)
+SELECT json_build_object('kind','native_empty_stream_retries','requests',count(*),
+ 'retry_attempts',coalesce(sum(retry_attempts),0),
+ 'completed_requests',count(*) FILTER(WHERE completed),
+ 'error_only_requests',count(*) FILTER(WHERE NOT completed),
+ 'incomplete_streams',count(*) FILTER(WHERE incomplete))
+FROM native_empty_stream_requests;
 WITH auto_review_requests AS (
  SELECT request_id,
   bool_or(type=2) AS completed,
@@ -104,7 +120,7 @@ for row in rows:
         alerts.append({'severity':'review','reason':'auto-review requests exhausted all candidates','count':row['error_only_requests']})
     if row['kind']=='auto_review_correlation' and row['incomplete_streams']:
         alerts.append({'severity':'review','reason':'auto-review incomplete streams','count':row['incomplete_streams']})
-result={'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'window_start':start,'window_end':end,'window_minutes':args.minutes,'http_status_counts':dict(http),'http_sample_count':len(durations),'http_p95_seconds':sorted(durations)[min(len(durations)-1,int(len(durations)*.95))] if durations else None,'aggregates':rows,'alerts':alerts,'interpretation':'Quota is internal ledger units, not supplier invoice. Error-only correlated requests are not a definitive final failure rate. Access log sample covers current log file; stream metadata supplements HTTP status.'}
+result={'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'window_start':start,'window_end':end,'window_minutes':args.minutes,'http_status_counts':dict(http),'http_sample_count':len(durations),'http_p95_seconds':sorted(durations)[min(len(durations)-1,int(len(durations)*.95))] if durations else None,'aggregates':rows,'alerts':alerts,'interpretation':'Quota is internal ledger units, not supplier invoice. Error-only correlated requests are not a definitive final failure rate. Native empty-stream retries are safe retries before any client bytes. Access log sample covers current log file; stream metadata supplements HTTP status.'}
 encoded=json.dumps(result,ensure_ascii=False,indent=2)
 if args.output:
     output=pathlib.Path(args.output)

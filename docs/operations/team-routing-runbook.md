@@ -50,6 +50,7 @@ Plus 的 Kimi 订阅白名单是 `kimi-for-coding`、`kimi-k3-256k`。Plus 火�
 比较基线与后续窗口：
 
 - HTTP 429/5xx、流式 `other.stream_status.status/end_reason`、缺少流状态的消费数。
+- `native_empty_stream_retries` 统计原生 Claude 上游在尚未向客户端发送任何事件时的同端点重试次数、最终完成数和失败数；已经向客户端输出过内容的流不得重试。
 - 按 request_id 关联的错误尝试和最终消费；一个请求可能有多个错误，不能直接计算日志错误条数比例。
 - 各分组/模型/供应商消费、网关记录的P95耗时和入口HTTP P95、缓存读取Token、内部配额。
 - 非VIP进入天翼、default出现额外模型、出现未列入分组策略的标签、重复渠道/向前回退，均应优先检查。
@@ -66,11 +67,11 @@ Plus 的 Kimi 订阅白名单是 `kimi-for-coding`、`kimi-k3-256k`。Plus 火�
 
 渠道设置 `protocol_routing` 为可选原子配置。未启用的渠道保持原行为；启用后，`defaults` 定义入口协议与已验证端点，`models` 按映射后的上游模型完整覆盖默认策略。路径附加在已有上游 Base URL；预置 Coding Plan 按目标协议选择对应 Base URL。当前认证适配范围为 OpenAI、Anthropic、Moonshot、VolcEngine，其他类型不能启用。
 
-每个端点声明 `openai`、`claude` 或 `openai_responses`，以及 stream/tools/parallel_tools/images/files/audio/video/structured_output/reasoning/hosted_tools 等能力和验证日期。未知能力不默认开放。入口支持不代表目标模型支持全部参数；例如实际原生测试确认 Kimi 开启 thinking 时不能指定强制 tool_choice，关闭 thinking 后两个原生协议均能完成工具调用。是否改变思考设置由管理员在 UI 中显式决定。
+每个端点声明 `openai`、`claude` 或 `openai_responses`，以及 stream/tools/parallel_tools/images/files/audio/video/structured_output/reasoning/hosted_tools 等能力和验证日期。跨协议端点只接受已验证的 `features`；原生同协议端点允许未列出的能力，并用 `unsupported_features` 明确拦截已经确认不支持的能力。入口支持不代表目标模型支持全部参数；例如实际原生测试确认 Kimi 开启 thinking 时不能指定强制 tool_choice，关闭 thinking 后两个原生协议均能完成工具调用。是否改变思考设置由管理员在 UI 中显式决定。
 
 `loss_policy` 默认 safe，跨协议在发送前拒绝已知不可保留的字段或工具历史；strict 更严格，allow 是明确允许损耗的选择。stateful/background 在第一阶段始终拒绝，不模拟 previous_response_id/会话存储。Messages count_tokens 路由仍未启用，本次不将其伪装成可用。
 
-选择顺序仍是分组供应商顺序；同账号优先原生协议，转换不会跨越白名单或替换模型。不兼容候选只记入 `admin_info.protocol_skips`，不消耗上游尝试次数；已发送流式字节后禁止切换供应商。流式失败发出客户端格式的错误事件，保留已报告的部分用量结算，不能在失败流后补成功完成事件。
+选择顺序仍是分组供应商顺序；同账号优先原生协议，转换不会跨越白名单或替换模型。原生请求保留 DTO 尚未认识的顶层字段，映射模型、系统提示词、禁用字段和参数覆盖仍由网关控制。不兼容候选只记入 `admin_info.protocol_skips`，不消耗上游尝试次数。原生 Claude 上游若以 HTTP 200 返回零事件空流，网关在同一端点安全重试一次，再按原顺序换账号；已发送任何流式字节后禁止重试或切换供应商。流式失败发出客户端格式的错误事件，保留已报告的部分用量结算，不能在失败流后补成功完成事件。
 
 `account_resource` 为非秘密账号资源标识；同一账号的渠道别名使用同一个值。`quota_scope` 可为 model（默认，使用链式映射后的上游模型）或 account。共享冷却和本次请求排除均跨别名生效，不重新尝试同一个资源。未配置标识时沿用渠道身份；多 Key 渠道仍以渠道为资源，不声称已支持 Key 级独立账号轮换。
 

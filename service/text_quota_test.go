@@ -462,6 +462,19 @@ func TestAppendUsageBillingPathForLogWritesAdminInfo(t *testing.T) {
 	require.Equal(t, usageBillingPathLocal, adminInfo["usage_billing_path"])
 }
 
+func TestAppendRelayLogAdminInfoIncludesNativeEmptyStreamRetries(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyProtocolNativeEmptyStreamRetries, 2)
+	other := model.NewLogOther()
+
+	AppendRelayLogAdminInfo(ctx, nil, other)
+
+	adminInfo, ok := other.Snapshot()["admin_info"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, 2, adminInfo["protocol_native_empty_stream_retries"])
+}
+
 func TestCacheWriteTokensTotal(t *testing.T) {
 	t.Run("split cache creation", func(t *testing.T) {
 		summary := textQuotaSummary{

@@ -78,6 +78,9 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 	if skips, exists := ctx.Get("protocol_skips"); exists {
 		other.SetAdmin("protocol_skips", skips)
 	}
+	if retries := common.GetContextKeyInt(ctx, constant.ContextKeyProtocolNativeEmptyStreamRetries); retries > 0 {
+		other.SetAdmin("protocol_native_empty_stream_retries", retries)
+	}
 	if relayInfo != nil {
 		if billingModel := relayInfo.GetBillingModelName(); billingModel != "" && billingModel != relayInfo.OriginModelName {
 			other.SetAdmin("billing_model", billingModel)
