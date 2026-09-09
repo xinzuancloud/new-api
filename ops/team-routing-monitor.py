@@ -97,6 +97,12 @@ GROUP BY l."group",c.tag,nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_rout
  nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}';
 SELECT json_build_object('kind','policy','key',key,'value',value) FROM options WHERE key='RoutingPolicy';
 SELECT json_build_object('kind','health','tag',tag,'status',status,'channels',count(*)) FROM channels GROUP BY tag,status;
+SELECT json_build_object('kind','ctyun_state',
+ 'active_channels',count(*) FILTER(WHERE status=1),
+ 'enabled_abilities',(SELECT count(*) FROM abilities WHERE tag='ctyun' AND enabled),
+ 'enabled_non_vip_abilities',(SELECT count(*) FROM abilities WHERE tag='ctyun' AND enabled AND "group"<>'vip'),
+ 'consume_logs',(SELECT count(*) FROM logs l JOIN channels lc ON lc.id=l.channel_id WHERE l.type=2 AND lc.tag='ctyun' AND l.created_at BETWEEN {start} AND {end}))
+FROM channels WHERE tag='ctyun';
 SELECT json_build_object(
  'kind','search_tool_charges','group',l."group",'tag',c.tag,'model',l.model_name,
  'source',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}',
@@ -158,6 +164,8 @@ for row in rows:
         alerts.append({'severity':'review','reason':'native empty-stream retries did not recover','count':row['error_only_requests']})
     if row['kind']=='provider_rate_limits' and row['exhausted_requests']:
         alerts.append({'severity':'review','reason':'provider rate limits exhausted all candidates','group':row['group'],'model':row['model'],'count':row['exhausted_requests']})
+    if row['kind']=='ctyun_state' and (row['active_channels'] or row['enabled_abilities'] or row['consume_logs']):
+        alerts.append({'severity':'critical','reason':'CTYun must remain disabled','active_channels':row['active_channels'],'enabled_abilities':row['enabled_abilities'],'consume_logs':row['consume_logs']})
 for key,count in auth_http.items():
     endpoint,status=key.split(':',1)
     if status == '429': alerts.append({'severity':'review','reason':'authentication endpoint returned 429','endpoint':endpoint,'count':count})
