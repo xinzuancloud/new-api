@@ -151,6 +151,10 @@ SenseNova and Fire accepted tested DeepSeek V4 Flash Chat `json_schema` requests
 
 Current evidence and configuration snapshots live in `/opt/ops-backups/protocol-compat-fix/`. Continue read-only monitoring. Do not run real probes or mutate configuration from the heartbeat.
 
+Runtime `v1.0.0-rc.36-fork.20260909.t114704.g858566d76330` adds the configurable `responses_lite_bridge` endpoint feature. Enable it only on a verified OpenAI Chat endpoint for a specific model. The bridge converts Responses Lite `additional_tools` namespaces into request-scoped Chat function aliases, preserves developer instructions as system instructions for Chat-compatible providers, and maps function/custom-tool output back to the original namespace and name. Provider and model names are not compiled into this behavior; `codex-auto-review` remains an ordinary UI-configured alias and can be remapped without rebuilding.
+
+The bridge intentionally excludes stored conversation/background controls and server-hosted tools. Those requests still need a native verified endpoint. Do not enable the bridge as a blanket substitute for native Responses support. Monitor `auto_review_correlation` for requests that exhaust every candidate, `auto_review_routes` for the actual supplier/protocol path, and stream completion separately from HTTP status.
+
 ### Frontend deployment acceptance
 
 Prefer the verified release binary or a complete frontend build. A local `web/dist/index.html` may be an empty placeholder used for Go tests; its existence does not prove an actual frontend build. Never reuse it without verification. For a manual build, run `bun install --frozen-lockfile` and `bun run build` under `web/` before compiling the Go binary, and verify the resulting candidate's served assets.

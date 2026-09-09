@@ -27,6 +27,30 @@ SELECT json_build_object('kind','attempts','channel',channel_id,'type',type,'cou
 WITH requests AS(SELECT request_id,bool_or(type=2) AS consumed,count(*) FILTER(WHERE type=5) AS errors FROM logs l WHERE type IN(2,5) AND request_id<>'' AND created_at BETWEEN {start} AND {end} GROUP BY request_id) SELECT json_build_object('kind','correlation','requests',count(*),'recovered_after_errors',count(*) FILTER(WHERE consumed AND errors>0),'error_only_requests',count(*) FILTER(WHERE NOT consumed),'error_attempts',sum(errors)) FROM requests;
 SELECT json_build_object('kind','stream_end','reason',nullif(l.other,'')::jsonb#>>'{{stream_status,end_reason}}','count',count(*)) FROM logs l WHERE l.type=2 AND is_stream AND created_at BETWEEN {start} AND {end} GROUP BY 2;
 SELECT json_build_object('kind','protocol_routes','source',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}','target',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}','requests',count(*),'incomplete_streams',count(*) FILTER(WHERE nullif(l.other,'')::jsonb#>>'{{stream_status,status}}'='error'),'skipped_candidates',sum(CASE WHEN jsonb_typeof(nullif(l.other,'')::jsonb#>'{{admin_info,protocol_skips}}')='array' THEN jsonb_array_length(nullif(l.other,'')::jsonb#>'{{admin_info,protocol_skips}}') ELSE 0 END)) FROM logs l WHERE l.type=2 AND created_at BETWEEN {start} AND {end} AND nullif(l.other,'')::jsonb#>'{{admin_info,protocol_route}}' IS NOT NULL GROUP BY nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}';
+WITH auto_review_requests AS (
+ SELECT request_id,
+  bool_or(type=2) AS completed,
+  count(*) FILTER(WHERE type=5) AS error_attempts,
+  count(*) FILTER(WHERE type=2 AND nullif(other,'')::jsonb#>>'{{stream_status,status}}'='error') AS incomplete_streams
+ FROM logs
+ WHERE model_name='codex-auto-review' AND type IN(2,5) AND request_id<>''
+  AND created_at BETWEEN {start} AND {end}
+ GROUP BY request_id
+)
+SELECT json_build_object('kind','auto_review_correlation','requests',count(*),
+ 'completed_requests',count(*) FILTER(WHERE completed),
+ 'recovered_after_errors',count(*) FILTER(WHERE completed AND error_attempts>0),
+ 'error_only_requests',count(*) FILTER(WHERE NOT completed),
+ 'error_attempts',sum(error_attempts),'incomplete_streams',sum(incomplete_streams))
+FROM auto_review_requests;
+SELECT json_build_object('kind','auto_review_routes','group',l."group",'tag',coalesce(c.tag,'untagged'),
+ 'source',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}',
+ 'target',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}',
+ 'requests',count(*),'incomplete_streams',count(*) FILTER(WHERE nullif(l.other,'')::jsonb#>>'{{stream_status,status}}'='error'))
+FROM logs l LEFT JOIN channels c ON c.id=l.channel_id
+WHERE l.type=2 AND l.model_name='codex-auto-review' AND l.created_at BETWEEN {start} AND {end}
+GROUP BY l."group",c.tag,nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}',
+ nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}';
 SELECT json_build_object('kind','policy','key',key,'value',value) FROM options WHERE key='RoutingPolicy';
 SELECT json_build_object('kind','health','tag',tag,'status',status,'channels',count(*)) FROM channels GROUP BY tag,status;
 SELECT json_build_object(
@@ -76,6 +100,10 @@ for row in rows:
         alerts.append({'severity':'critical','reason':'route outside configured group tags','group':row['group'],'tag':row['tag'],'count':row['consume_logs']})
     if row['kind']=='routes' and row['incomplete_streams']:
         alerts.append({'severity':'review','reason':'incomplete streams','group':row['group'],'tag':row['tag'],'count':row['incomplete_streams']})
+    if row['kind']=='auto_review_correlation' and row['error_only_requests']:
+        alerts.append({'severity':'review','reason':'auto-review requests exhausted all candidates','count':row['error_only_requests']})
+    if row['kind']=='auto_review_correlation' and row['incomplete_streams']:
+        alerts.append({'severity':'review','reason':'auto-review incomplete streams','count':row['incomplete_streams']})
 result={'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'window_start':start,'window_end':end,'window_minutes':args.minutes,'http_status_counts':dict(http),'http_sample_count':len(durations),'http_p95_seconds':sorted(durations)[min(len(durations)-1,int(len(durations)*.95))] if durations else None,'aggregates':rows,'alerts':alerts,'interpretation':'Quota is internal ledger units, not supplier invoice. Error-only correlated requests are not a definitive final failure rate. Access log sample covers current log file; stream metadata supplements HTTP status.'}
 encoded=json.dumps(result,ensure_ascii=False,indent=2)
 if args.output:
