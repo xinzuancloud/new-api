@@ -236,3 +236,24 @@ func TestNativeClaudeEmptyStreamRetriesSameEndpointOnce(t *testing.T) {
 	assert.Equal(t, 2, attempts)
 	assert.Contains(t, c.Writer.(*protocolTestWriter).recorder.Body.String(), "message_stop")
 }
+
+func TestNativeClaudeEmptyStreamRetryIsCappedAcrossChannels(t *testing.T) {
+	originalTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = originalTimeout })
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "text/event-stream")
+	}))
+	defer server.Close()
+	c, info := protocolTestContext(t, types.RelayFormatClaude, `{"model":"public-model","messages":[{"role":"user","content":"hello"}],"max_tokens":32,"stream":true}`, server.URL, types.RelayFormatClaude)
+	common.SetContextKey(c, constant.ContextKeyProtocolNativeEmptyStreamRetries, 1)
+	plan, apiErr := PrepareProtocolRequest(c, info)
+	require.Nil(t, apiErr)
+
+	_, apiErr = sendProtocolRequest(c, info, plan)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, 1, attempts)
+	assert.Equal(t, 1, common.GetContextKeyInt(c, constant.ContextKeyProtocolNativeEmptyStreamRetries))
+}

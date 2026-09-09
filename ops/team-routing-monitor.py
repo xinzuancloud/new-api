@@ -30,7 +30,7 @@ SELECT json_build_object('kind','protocol_routes','source',nullif(l.other,'')::j
 WITH native_empty_stream_requests AS (
  SELECT request_id,
   max((nullif(other,'')::jsonb#>>'{{admin_info,protocol_native_empty_stream_retries}}')::integer) AS retry_attempts,
-  bool_or(type=2) AS completed,
+  bool_or(type=2 AND nullif(other,'')::jsonb#>>'{{stream_status,status}}'='ok') AS completed,
   bool_or(type=2 AND nullif(other,'')::jsonb#>>'{{stream_status,status}}'='error') AS incomplete
  FROM logs
  WHERE type IN(2,5) AND request_id<>'' AND created_at BETWEEN {start} AND {end}
@@ -120,6 +120,8 @@ for row in rows:
         alerts.append({'severity':'review','reason':'auto-review requests exhausted all candidates','count':row['error_only_requests']})
     if row['kind']=='auto_review_correlation' and row['incomplete_streams']:
         alerts.append({'severity':'review','reason':'auto-review incomplete streams','count':row['incomplete_streams']})
+    if row['kind']=='native_empty_stream_retries' and row['error_only_requests']:
+        alerts.append({'severity':'review','reason':'native empty-stream retries did not recover','count':row['error_only_requests']})
 result={'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'window_start':start,'window_end':end,'window_minutes':args.minutes,'http_status_counts':dict(http),'http_sample_count':len(durations),'http_p95_seconds':sorted(durations)[min(len(durations)-1,int(len(durations)*.95))] if durations else None,'aggregates':rows,'alerts':alerts,'interpretation':'Quota is internal ledger units, not supplier invoice. Error-only correlated requests are not a definitive final failure rate. Native empty-stream retries are safe retries before any client bytes. Access log sample covers current log file; stream metadata supplements HTTP status.'}
 encoded=json.dumps(result,ensure_ascii=False,indent=2)
 if args.output:
