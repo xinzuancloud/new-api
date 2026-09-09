@@ -218,7 +218,7 @@ export function ChannelProtocolRoutingSection(props: {
             </p>
             <p className='text-muted-foreground text-xs break-words'>
               {t(
-                'Declare only verified features: {{features}}. Stateful and background requests are currently unsupported.',
+                'Declare verified cross-protocol capabilities in features: {{features}}. Native endpoints allow unlisted capabilities; list confirmed failures in unsupported_features. Stateful and background requests are currently unsupported.',
                 { features: PROTOCOL_FEATURES.join(', ') }
               )}{' '}
               {t(

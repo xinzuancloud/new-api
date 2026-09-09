@@ -178,6 +178,7 @@ func planProtocolProbes(request protocolProbePlanRequest) (*model.ProtocolProbeR
 					selected = true
 					// Features/verification are not evidence; reports need only the selected path.
 					endpoint.Features = nil
+					endpoint.UnsupportedFeatures = nil
 					endpoint.Verified = false
 					endpoint.VerifiedAt = ""
 					report.Cases = append(report.Cases, model.ProtocolProbeCase{ID: len(report.Cases) + 1, ChannelID: ch.Id, Model: name, Endpoint: endpoint, Check: check, Result: model.ProtocolProbeResult{Outcome: "pending", Reason: "not_run"}})

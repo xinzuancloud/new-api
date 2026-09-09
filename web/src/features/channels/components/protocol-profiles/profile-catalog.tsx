@@ -68,7 +68,7 @@ export function ProfileCatalog(props: {
       </p>
       <p className='text-muted-foreground text-sm'>
         {t(
-          'Partial policies inherit unchanged fields. endpoint_overrides features use true to add and false to remove; full entry_formats and endpoints replace the policy.'
+          'Partial policies inherit unchanged fields. endpoint_overrides features and unsupported_features use true to add and false to remove; full entry_formats and endpoints replace the policy.'
         )}
       </p>
       <Button

@@ -32,19 +32,21 @@ type ProtocolModelPolicy struct {
 }
 
 type ProtocolEndpointOverride struct {
-	Format     types.RelayFormat `json:"format"`
-	Path       string            `json:"path,omitempty"`
-	Features   map[string]bool   `json:"features,omitempty"`
-	Verified   *bool             `json:"verified,omitempty"`
-	VerifiedAt *string           `json:"verified_at,omitempty"`
+	Format              types.RelayFormat `json:"format"`
+	Path                string            `json:"path,omitempty"`
+	Features            map[string]bool   `json:"features,omitempty"`
+	UnsupportedFeatures map[string]bool   `json:"unsupported_features,omitempty"`
+	Verified            *bool             `json:"verified,omitempty"`
+	VerifiedAt          *string           `json:"verified_at,omitempty"`
 }
 
 type ProtocolEndpoint struct {
-	Format     types.RelayFormat `json:"format"`
-	Path       string            `json:"path"`
-	Features   []string          `json:"features,omitempty"`
-	Verified   bool              `json:"verified"`
-	VerifiedAt string            `json:"verified_at,omitempty"`
+	Format              types.RelayFormat `json:"format"`
+	Path                string            `json:"path"`
+	Features            []string          `json:"features,omitempty"`
+	UnsupportedFeatures []string          `json:"unsupported_features,omitempty"`
+	Verified            bool              `json:"verified"`
+	VerifiedAt          string            `json:"verified_at,omitempty"`
 }
 
 func (s *ProtocolRoutingSettings) Validate() error {
@@ -118,20 +120,31 @@ func (p ProtocolModelPolicy) Validate() error {
 			return fmt.Errorf("duplicate endpoint")
 		}
 		seen[key] = true
-		if len(endpoint.Features) > 14 {
+		if len(endpoint.Features) > 14 || len(endpoint.UnsupportedFeatures) > 14 {
 			return fmt.Errorf("endpoint has too many features")
 		}
 		features := map[string]bool{}
 		for _, feature := range endpoint.Features {
-			switch feature {
-			case "stream", "tools", "parallel_tools", "images", "files", "audio", "video", "structured_output", "reasoning", "hosted_tools", "context_editing", "responses_lite_bridge", "stateful", "background":
-			default:
+			if !validProtocolFeature(feature) {
 				return fmt.Errorf("endpoint feature is invalid")
 			}
 			if features[feature] {
 				return fmt.Errorf("duplicate endpoint feature")
 			}
 			features[feature] = true
+		}
+		unsupported := map[string]bool{}
+		for _, feature := range endpoint.UnsupportedFeatures {
+			if !validProtocolFeature(feature) {
+				return fmt.Errorf("endpoint unsupported feature is invalid")
+			}
+			if unsupported[feature] {
+				return fmt.Errorf("duplicate endpoint unsupported feature")
+			}
+			if features[feature] {
+				return fmt.Errorf("endpoint feature cannot be both supported and unsupported")
+			}
+			unsupported[feature] = true
 		}
 		if endpoint.VerifiedAt != "" {
 			if _, err := time.Parse(time.RFC3339, endpoint.VerifiedAt); err != nil {
@@ -181,6 +194,7 @@ func (p ProtocolModelPolicy) Merge(override ProtocolModelPolicy) (ProtocolModelP
 	p.Endpoints = endpoints
 	for i := range p.Endpoints {
 		p.Endpoints[i].Features = append([]string(nil), p.Endpoints[i].Features...)
+		p.Endpoints[i].UnsupportedFeatures = append([]string(nil), p.Endpoints[i].UnsupportedFeatures...)
 	}
 	if len(override.EndpointOverrides) > 16 {
 		return p, fmt.Errorf("too many endpoint overrides")
@@ -201,10 +215,19 @@ func (p ProtocolModelPolicy) Merge(override ProtocolModelPolicy) (ProtocolModelP
 		}
 		seen[index] = true
 		endpoint := &p.Endpoints[index]
+		for feature, enabled := range change.Features {
+			if enabled && change.UnsupportedFeatures[feature] {
+				return p, fmt.Errorf("endpoint feature cannot be both supported and unsupported")
+			}
+		}
 		if change.Features != nil {
 			features := map[string]bool{}
+			unsupported := map[string]bool{}
 			for _, feature := range endpoint.Features {
 				features[feature] = true
+			}
+			for _, feature := range endpoint.UnsupportedFeatures {
+				unsupported[feature] = true
 			}
 			for feature, enabled := range change.Features {
 				if !validProtocolFeature(feature) {
@@ -212,6 +235,7 @@ func (p ProtocolModelPolicy) Merge(override ProtocolModelPolicy) (ProtocolModelP
 				}
 				if enabled {
 					features[feature] = true
+					delete(unsupported, feature)
 				} else {
 					delete(features, feature)
 				}
@@ -221,6 +245,42 @@ func (p ProtocolModelPolicy) Merge(override ProtocolModelPolicy) (ProtocolModelP
 				endpoint.Features = append(endpoint.Features, feature)
 			}
 			sort.Strings(endpoint.Features)
+			endpoint.UnsupportedFeatures = nil
+			for feature := range unsupported {
+				endpoint.UnsupportedFeatures = append(endpoint.UnsupportedFeatures, feature)
+			}
+			sort.Strings(endpoint.UnsupportedFeatures)
+		}
+		if change.UnsupportedFeatures != nil {
+			features := map[string]bool{}
+			unsupported := map[string]bool{}
+			for _, feature := range endpoint.Features {
+				features[feature] = true
+			}
+			for _, feature := range endpoint.UnsupportedFeatures {
+				unsupported[feature] = true
+			}
+			for feature, disabled := range change.UnsupportedFeatures {
+				if !validProtocolFeature(feature) {
+					return p, fmt.Errorf("endpoint unsupported feature is invalid")
+				}
+				if disabled {
+					unsupported[feature] = true
+					delete(features, feature)
+				} else {
+					delete(unsupported, feature)
+				}
+			}
+			endpoint.Features = nil
+			for feature := range features {
+				endpoint.Features = append(endpoint.Features, feature)
+			}
+			sort.Strings(endpoint.Features)
+			endpoint.UnsupportedFeatures = nil
+			for feature := range unsupported {
+				endpoint.UnsupportedFeatures = append(endpoint.UnsupportedFeatures, feature)
+			}
+			sort.Strings(endpoint.UnsupportedFeatures)
 		}
 		if change.Verified != nil {
 			endpoint.Verified = *change.Verified

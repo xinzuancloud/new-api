@@ -70,6 +70,11 @@ const completeProtocolModelPolicySchema = z
               .max(PROTOCOL_FEATURES.length)
               .refine(unique)
               .optional(),
+            unsupported_features: z
+              .array(z.enum(PROTOCOL_FEATURES))
+              .max(PROTOCOL_FEATURES.length)
+              .refine(unique)
+              .optional(),
             verified: z.boolean(),
             verified_at: z.iso
               .datetime({ offset: true })
@@ -77,6 +82,18 @@ const completeProtocolModelPolicySchema = z
               .optional(),
           })
           .strict()
+          .superRefine((endpoint, ctx) => {
+            if (!endpoint.features || !endpoint.unsupported_features) return
+            const unsupported = new Set(endpoint.unsupported_features)
+            if (endpoint.features.some((feature) => unsupported.has(feature))) {
+              ctx.addIssue({
+                code: 'custom',
+                path: ['unsupported_features'],
+                message:
+                  'A capability cannot be both supported and unsupported',
+              })
+            }
+          })
       )
       .min(1)
       .max(16)
@@ -99,6 +116,9 @@ export const protocolModelPolicySchema = completeProtocolModelPolicySchema
             format: formatSchema,
             path: completeProtocolModelPolicySchema.shape.endpoints.element.shape.path.optional(),
             features: z
+              .partialRecord(z.enum(PROTOCOL_FEATURES), z.boolean())
+              .optional(),
+            unsupported_features: z
               .partialRecord(z.enum(PROTOCOL_FEATURES), z.boolean())
               .optional(),
             verified: z.boolean().optional(),

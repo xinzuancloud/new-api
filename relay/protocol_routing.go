@@ -2,12 +2,14 @@ package relay
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/claude"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
@@ -156,6 +158,19 @@ func PrepareProtocolRequest(c *gin.Context, info *relaycommon.RelayInfo) (*Prepa
 		if marshalErr != nil {
 			return capabilityError("cannot encode converted request")
 		}
+		if candidate.Endpoint.Format == info.RelayFormat {
+			var shapedBody map[string]any
+			if common.Unmarshal(data, &shapedBody) != nil {
+				return capabilityError("cannot inspect native request")
+			}
+			nativeBody := make(map[string]any, len(source)+len(shapedBody))
+			maps.Copy(nativeBody, source)
+			maps.Copy(nativeBody, shapedBody)
+			data, marshalErr = common.Marshal(nativeBody)
+			if marshalErr != nil {
+				return capabilityError("cannot encode native request")
+			}
+		}
 		data, err = relaycommon.RemoveDisabledFields(data, info.ChannelOtherSettings, false)
 		if err != nil {
 			return capabilityError("cannot apply protocol field policy")
@@ -170,7 +185,13 @@ func PrepareProtocolRequest(c *gin.Context, info *relaycommon.RelayInfo) (*Prepa
 		if common.Unmarshal(data, &outbound) != nil {
 			return capabilityError("cannot inspect converted request")
 		}
-		if service.ValidateProtocolEndpointFeatures(candidate.Endpoint, candidate.Endpoint.Format, outbound) != nil {
+		var endpointErr error
+		if candidate.Endpoint.Format == info.RelayFormat {
+			endpointErr = service.ValidateNativeProtocolEndpointFeatures(candidate.Endpoint, candidate.Endpoint.Format, outbound)
+		} else {
+			endpointErr = service.ValidateProtocolEndpointFeatures(candidate.Endpoint, candidate.Endpoint.Format, outbound)
+		}
+		if endpointErr != nil {
 			continue
 		}
 		// The administrator's existing explicit model map is authoritative. Parameter
@@ -254,11 +275,6 @@ func ExecuteProtocolRequest(c *gin.Context, info *relaycommon.RelayInfo, plan *P
 }
 
 func sendProtocolRequest(c *gin.Context, info *relaycommon.RelayInfo, plan *PreparedProtocolRequest) (*dto.Usage, *types.NewAPIError) {
-	body, closer, err := relaycommon.NewOutboundJSONBody(plan.Body)
-	if err != nil {
-		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-	}
-	defer closer.Close()
 	adaptor := &protocolEndpointAdaptor{Adaptor: plan.adaptor, endpoint: plan.Endpoint}
 	savedMode, savedPath := info.RelayMode, info.RequestURLPath
 	defer func() { info.RelayMode = savedMode; info.RequestURLPath = savedPath }()
@@ -271,6 +287,29 @@ func sendProtocolRequest(c *gin.Context, info *relaycommon.RelayInfo, plan *Prep
 	case types.RelayFormatOpenAIResponses:
 		info.RelayMode = relayconstant.RelayModeResponses
 	}
+	maxAttempts := 1
+	if plan.Endpoint.Format == types.RelayFormatClaude && info.IsStream {
+		maxAttempts = 2
+	}
+	for attempt := range maxAttempts {
+		usage, apiErr := sendProtocolRequestAttempt(c, info, plan, adaptor)
+		if attempt == 0 && apiErr != nil && info.ReceivedResponseCount == 0 && !c.Writer.Written() && c.Request.Context().Err() == nil && info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonEOF {
+			logger.LogWarn(c, "empty native Claude stream; retrying the same endpoint once")
+			info.StreamStatus = nil
+			service.ResetClaudeWebSearchBilling(c)
+			continue
+		}
+		return usage, apiErr
+	}
+	return nil, types.NewError(fmt.Errorf("protocol request attempts exhausted"), types.ErrorCodeBadResponse)
+}
+
+func sendProtocolRequestAttempt(c *gin.Context, info *relaycommon.RelayInfo, plan *PreparedProtocolRequest, adaptor *protocolEndpointAdaptor) (*dto.Usage, *types.NewAPIError) {
+	body, closer, err := relaycommon.NewOutboundJSONBody(plan.Body)
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	defer closer.Close()
 	resp, err := channel.DoApiRequest(adaptor, c, info, body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusBadGateway)

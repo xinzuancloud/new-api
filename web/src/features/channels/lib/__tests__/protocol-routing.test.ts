@@ -117,6 +117,39 @@ describe('protocol routing channel configuration', () => {
 })
 
 describe('protocol routing validation boundaries', () => {
+  test('accepts explicit unsupported capabilities for native endpoint policy', () => {
+    expect(
+      protocolModelPolicySchema.safeParse({
+        entry_formats: ['claude'],
+        endpoints: [
+          {
+            format: 'claude',
+            path: '/v1/messages',
+            features: ['tools'],
+            unsupported_features: ['images'],
+            verified: true,
+          },
+        ],
+        loss_policy: 'safe',
+      }).success
+    ).toBe(true)
+  })
+  test('rejects a capability declared as both supported and unsupported', () => {
+    expect(
+      protocolModelPolicySchema.safeParse({
+        entry_formats: ['claude'],
+        endpoints: [
+          {
+            format: 'claude',
+            path: '/v1/messages',
+            features: ['images'],
+            unsupported_features: ['images'],
+            verified: true,
+          },
+        ],
+      }).success
+    ).toBe(false)
+  })
   test('disabled empty configuration can be loaded and saved', () => {
     const emptyRouting = {
       enabled: false,

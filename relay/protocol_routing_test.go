@@ -200,3 +200,39 @@ func TestNativeClaudeContextEditingIsPreserved(t *testing.T) {
 		assert.Equal(t, want, sent["context_management"])
 	}
 }
+
+func TestNativeProtocolRequestPreservesUnknownFields(t *testing.T) {
+	c, info := protocolTestContext(t, types.RelayFormatClaude, `{"model":"public-model","messages":[{"role":"user","content":"hello"}],"max_tokens":32,"vendor_future":{"enabled":true}}`, "https://example.invalid", types.RelayFormatClaude)
+	plan, apiErr := PrepareProtocolRequest(c, info)
+	require.Nil(t, apiErr)
+	require.NotNil(t, plan)
+	var sent map[string]any
+	require.NoError(t, common.Unmarshal(plan.Body, &sent))
+	assert.Equal(t, map[string]any{"enabled": true}, sent["vendor_future"])
+	assert.Equal(t, "upstream-model", sent["model"])
+}
+
+func TestNativeClaudeEmptyStreamRetriesSameEndpointOnce(t *testing.T) {
+	originalTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = originalTimeout })
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if attempts == 1 {
+			return
+		}
+		_, _ = w.Write([]byte(protocolStreamFixture(types.RelayFormatClaude, "")))
+	}))
+	defer server.Close()
+	c, info := protocolTestContext(t, types.RelayFormatClaude, `{"model":"public-model","messages":[{"role":"user","content":"hello"}],"max_tokens":32,"stream":true}`, server.URL, types.RelayFormatClaude)
+	plan, apiErr := PrepareProtocolRequest(c, info)
+	require.Nil(t, apiErr)
+
+	usage, apiErr := sendProtocolRequest(c, info, plan)
+	require.Nil(t, apiErr)
+	require.NotNil(t, usage)
+	assert.Equal(t, 2, attempts)
+	assert.Contains(t, c.Writer.(*protocolTestWriter).recorder.Body.String(), "message_stop")
+}

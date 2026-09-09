@@ -67,6 +67,30 @@ func TestProtocolCapabilityDiagnostics(t *testing.T) {
 	assert.EqualError(t, err, "no verified protocol endpoint supports the request capabilities; no endpoints are verified")
 }
 
+func TestNativeProtocolCandidatesAllowUnknownCapabilitiesUnlessExplicitlyUnsupported(t *testing.T) {
+	request := map[string]any{
+		"stream": true,
+		"tools":  []any{map[string]any{"type": "web_search"}},
+		"input":  []any{map[string]any{"type": "input_image", "image_url": "private image"}},
+	}
+	endpoint := dto.ProtocolEndpoint{Format: types.RelayFormatClaude, Path: "/v1/messages", Verified: true}
+	policy := &dto.ProtocolRoutingSettings{Enabled: true, Defaults: dto.ProtocolModelPolicy{
+		EntryFormats: []types.RelayFormat{types.RelayFormatClaude},
+		Endpoints:    []dto.ProtocolEndpoint{endpoint},
+	}}
+
+	candidates, err := BuildProtocolCandidates(policy, "model", types.RelayFormatClaude, request)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	require.NoError(t, ValidateNativeProtocolEndpointFeatures(candidates[0].Endpoint, types.RelayFormatClaude, request))
+
+	policy.Defaults.Endpoints[0].UnsupportedFeatures = []string{"images"}
+	candidates, err = BuildProtocolCandidates(policy, "model", types.RelayFormatClaude, request)
+	require.ErrorContains(t, err, "unsupported capabilities: images")
+	assert.Empty(t, candidates)
+	assert.NotContains(t, err.Error(), "private")
+}
+
 func TestProtocolSettingsValidation(t *testing.T) {
 	for _, path := range []string{"https://other.test/v1", "//other.test/v1", "/v1?api_key=secret", "/v1#fragment", "/v1/../secret", "/v1/%2e%2e/secret", "/v1\\secret", "/v1\nsecret"} {
 		t.Run(path, func(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 )
 
 func TestResolution(t *testing.T) {
-	catalog, err := Parse(`{"vendor":{"name":"Vendor","channel_types":[1],"base_urls":["https://example.com"],"defaults":{"entry_formats":["openai"],"endpoints":[{"format":"openai","path":"/v1/chat/completions","features":["tools","stream"],"verified":true}],"loss_policy":"strict"},"models":{"special":{"endpoint_overrides":[{"format":"openai","features":{"tools":false}}]}}}}`)
+	catalog, err := Parse(`{"vendor":{"name":"Vendor","channel_types":[1],"base_urls":["https://example.com"],"defaults":{"entry_formats":["openai"],"endpoints":[{"format":"openai","path":"/v1/chat/completions","features":["tools","stream"],"unsupported_features":["images"],"verified":true}],"loss_policy":"strict"},"models":{"special":{"endpoint_overrides":[{"format":"openai","features":{"tools":false},"unsupported_features":{"images":false,"hosted_tools":true}}]}}}}`)
 	require.NoError(t, err)
 	settings := &dto.ProtocolRoutingSettings{Enabled: true, Profile: "vendor"}
 	require.NoError(t, catalog.ValidateChannel(settings, 1, "https://example.com/"))
@@ -17,9 +17,11 @@ func TestResolution(t *testing.T) {
 	policy, err := catalog.Resolve(settings, "special")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"stream"}, policy.Endpoints[0].Features)
+	assert.Equal(t, []string{"hosted_tools"}, policy.Endpoints[0].UnsupportedFeatures)
 	plain, err := catalog.Resolve(settings, "plain")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"tools", "stream"}, plain.Endpoints[0].Features)
+	assert.Equal(t, []string{"images"}, plain.Endpoints[0].UnsupportedFeatures)
 	replacement := dto.ProtocolModelPolicy{EntryFormats: []types.RelayFormat{types.RelayFormatOpenAI}, Endpoints: plain.Endpoints}
 	settings.Models = map[string]dto.ProtocolModelPolicy{"special": replacement}
 	policy, err = catalog.Resolve(settings, "special")

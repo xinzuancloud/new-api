@@ -16,9 +16,9 @@ type ProtocolCandidate struct {
 	LossPolicy string
 }
 
-// BuildProtocolCandidates plans only declared, verified capabilities. It never
-// probes providers or includes request content in diagnostics. Nil/disabled
-// configuration returns no plan so legacy routing can continue unchanged.
+// BuildProtocolCandidates requires declared support for conversion endpoints.
+// Native endpoints accept unclassified capabilities and reject only explicit
+// unsupported declarations. It never includes request content in diagnostics.
 func BuildProtocolCandidates(settings *dto.ProtocolRoutingSettings, upstreamModel string, source types.RelayFormat, request any) ([]ProtocolCandidate, error) {
 	if settings == nil || !settings.Enabled {
 		return nil, nil
@@ -54,10 +54,16 @@ func BuildProtocolCandidates(settings *dto.ProtocolRoutingSettings, upstreamMode
 		if !endpoint.Verified {
 			continue
 		}
-		if err := validateProtocolFeatures(endpoint, required); err != nil {
+		var endpointErr error
+		if endpoint.Format == source {
+			endpointErr = validateNativeProtocolFeatures(endpoint, required)
+		} else {
+			endpointErr = validateProtocolFeatures(endpoint, required)
+		}
+		if endpointErr != nil {
 			// Only validated format identifiers and canonical capability names are
 			// included: never expose request values or administrator endpoint paths.
-			rejections = append(rejections, fmt.Sprintf("%s: %s", endpoint.Format, err))
+			rejections = append(rejections, fmt.Sprintf("%s: %s", endpoint.Format, endpointErr))
 			continue
 		}
 		candidates = append(candidates, ProtocolCandidate{Endpoint: endpoint, LossPolicy: loss})
@@ -74,8 +80,46 @@ func BuildProtocolCandidates(settings *dto.ProtocolRoutingSettings, upstreamMode
 	return candidates, nil
 }
 
-// ValidateProtocolEndpointFeatures rechecks the final wire request after channel
-// parameter overrides and conversion; callers must invoke it before sending.
+// ValidateNativeProtocolEndpointFeatures permits capabilities the gateway has
+// not classified yet. Native providers remain authoritative unless an
+// administrator has explicitly recorded a capability as unsupported.
+func ValidateNativeProtocolEndpointFeatures(endpoint dto.ProtocolEndpoint, format types.RelayFormat, request any) error {
+	if !endpoint.Verified || endpoint.Format != format {
+		return fmt.Errorf("protocol endpoint is unverified or has a different wire format")
+	}
+	required, err := protocolRequiredFeatures(request)
+	if err != nil {
+		return err
+	}
+	return validateNativeProtocolFeatures(endpoint, required)
+}
+
+func validateNativeProtocolFeatures(endpoint dto.ProtocolEndpoint, required map[string]bool) error {
+	if endpoint.Format == types.RelayFormatOpenAI && required["context_editing"] {
+		return fmt.Errorf("OpenAI Chat endpoint cannot preserve context_management")
+	}
+	if endpoint.Format != types.RelayFormatOpenAI && required["responses_lite_bridge"] {
+		return fmt.Errorf("responses_lite_bridge requires an OpenAI Chat endpoint")
+	}
+	unsupported := make(map[string]bool, len(endpoint.UnsupportedFeatures))
+	for _, feature := range endpoint.UnsupportedFeatures {
+		unsupported[feature] = true
+	}
+	blocked := make([]string, 0, len(required))
+	for feature := range required {
+		if unsupported[feature] {
+			blocked = append(blocked, feature)
+		}
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	sort.Strings(blocked)
+	return fmt.Errorf("unsupported capabilities: %s", strings.Join(blocked, ", "))
+}
+
+// ValidateProtocolEndpointFeatures strictly checks a converted wire request
+// against the target endpoint's verified capabilities.
 func ValidateProtocolEndpointFeatures(endpoint dto.ProtocolEndpoint, format types.RelayFormat, request any) error {
 	if !endpoint.Verified || endpoint.Format != format {
 		return fmt.Errorf("protocol endpoint is unverified or has a different wire format")
