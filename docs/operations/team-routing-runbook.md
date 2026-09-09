@@ -136,3 +136,17 @@ Plus 的 Kimi 订阅白名单是 `kimi-for-coding`、`kimi-k3-256k`。Plus 火�
 原生 Responses 验证合法终止事件、检查实际写出并保留用量后，应立即结束扫描，无需等待上游关闭连接。成功终止写出与客户端取消同时发生时，以已交付的协议终止为准；终止前取消、无效终止、写出失败仍为错误。转换路径结束上游扫描后仍须完成下游格式的终止输出，不得直接套用原生交付确认。
 
 `client_gone / context canceled` 只说明网关观察到下游取消，不能单独判断用户主动停止、客户端解析失败或终止后正常断开。排查时结合协议方向、终止证据和客户端实际错误。历史日志不改写；新旧成功率比较须标明这次终止判定修复，不能将减少的误报全部解释为供应商可靠性改善。
+
+### Messages completion and Codex auto-review compatibility (2026-09-09)
+
+`codex-auto-review` is the authorized alias of `deepseek-v4-flash` on the original SenseNova free channels and Fire6. It uses the copied target input/output/cache prices; it is not a third underlying default model. The current alias guard baseline is `/opt/ops-backups/model-alias-codex-auto-review/guard-after.jsonl`.
+
+The owner explicitly declined `kimi-k3` → `kimi-k3-256k` substitution. Plus `kimi-k3` currently has only SenseNova same-name candidates. A cooldown-exhausted request can therefore legitimately return503 even though other suppliers offer256k variants. Do not add aliases, lift white lists, or change models to hide this condition.
+
+Claude Messages scanners now stop at `message_stop`. Only native terminal data whose write/flush succeeded can win a concurrent client cancellation. Converted streams still need checked downstream finalization. Early cancellation, empty EOF, missing `message_stop`, and write errors remain failures; preserve reported partial usage. This does not repair supplier-originated empty200 streams.
+
+Codex0.153.4 auto-review uses Responses Lite `additional_tools` with namespaced custom/function tools and JSON Schema. Offline reproduction identifies this input shape; original team bodies are not retained. Do not drop these declarations or claim a free-text test proves approval compatibility. Diagnostics identify a canonical content path and known type without logging arbitrary type values, tool arguments, or request bodies.
+
+SenseNova and Fire accepted tested DeepSeek V4 Flash Chat `json_schema` requests and returned valid schema output plus completed streams. The shared profiles declare `structured_output` only for that model's Chat endpoint. A valid sample does not prove every JSON Schema keyword or strict enforcement. Fire's native Responses schema test succeeded, but required namespace/custom tool probes returned text without tool calls, so those capabilities were not declared and native routing was not enabled on that evidence.
+
+Current evidence and configuration snapshots live in `/opt/ops-backups/protocol-compat-fix/`. Continue read-only monitoring. Do not run real probes or mutate configuration from the heartbeat.

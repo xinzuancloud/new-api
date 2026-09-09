@@ -296,7 +296,10 @@ streamLoop:
 				info.SetFirstResponseTime()
 				respErr := claude.HandleStreamResponseData(c, info, claudeInfo, string(v.Value.Bytes))
 				if respErr != nil {
-					return respErr, nil
+					if ctx.Err() != nil {
+						break streamLoop
+					}
+					return respErr, claudeInfo.Usage
 				}
 			case *bedrockruntimeTypes.UnknownUnionMember:
 				fmt.Println("unknown tag:", v.Tag)
@@ -309,7 +312,9 @@ streamLoop:
 	}
 
 	_ = stream.Close()
-	claude.HandleStreamFinalResponse(c, info, claudeInfo)
+	if err := claude.HandleStreamFinalResponse(c, info, claudeInfo); err != nil && ctx.Err() == nil {
+		return err, claudeInfo.Usage
+	}
 	return nil, claudeInfo.Usage
 }
 

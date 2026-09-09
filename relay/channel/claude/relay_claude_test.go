@@ -1,11 +1,14 @@
 package claude
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -409,8 +412,8 @@ func TestClaudeStreamFailureRetainsReportedBillingUsage(t *testing.T) {
 	oldTimeout := constant.StreamingTimeout
 	constant.StreamingTimeout = 30
 	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
-	for _, clientFormat := range []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses} {
-		for _, ending := range []string{"error", "eof", "legacy_eof", "message_stop"} {
+	for _, clientFormat := range []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses} {
+		for _, ending := range []string{"error", "eof", "empty_eof", "legacy_eof", "message_stop"} {
 			t.Run(string(clientFormat)+"/"+ending, func(t *testing.T) {
 				frames := []string{
 					`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test","role":"assistant","usage":{"input_tokens":100,"cache_read_input_tokens":20}}}`,
@@ -421,6 +424,9 @@ func TestClaudeStreamFailureRetainsReportedBillingUsage(t *testing.T) {
 				}
 				if ending != "error" {
 					frames = frames[:len(frames)-1]
+				}
+				if ending == "empty_eof" {
+					frames = nil
 				}
 				if ending == "message_stop" {
 					frames = append(frames, `data: {"type":"message_stop"}`)
@@ -446,6 +452,12 @@ func TestClaudeStreamFailureRetainsReportedBillingUsage(t *testing.T) {
 				}
 				require.NotNil(t, apiErr)
 				require.NotNil(t, usage)
+				if ending == "empty_eof" {
+					assert.False(t, info.StreamStatus.IsSuccessful())
+					assert.NotContains(t, recorder.Body.String(), "[DONE]")
+					assert.NotContains(t, recorder.Body.String(), "response.completed")
+					return
+				}
 				assert.Equal(t, 100, usage.PromptTokens)
 				assert.Equal(t, 10, usage.CompletionTokens)
 				assert.Equal(t, 20, usage.PromptTokensDetails.CachedTokens)
@@ -462,5 +474,168 @@ func TestClaudeStreamFailureRetainsReportedBillingUsage(t *testing.T) {
 			})
 		}
 
+	}
+}
+
+// Close the client during Flush and wait until the scanner has observed it.
+// This reproduces delivery racing cancellation without relying on scheduling.
+type claudeDisconnectWriter struct {
+	*httptest.ResponseRecorder
+	cancel   context.CancelFunc
+	closed   <-chan struct{}
+	cancelOn string
+	failOn   string
+}
+
+func (w *claudeDisconnectWriter) Write(p []byte) (int, error) {
+	if w.failOn != "" && strings.Contains(string(p), w.failOn) {
+		return 0, io.ErrClosedPipe
+	}
+	return w.ResponseRecorder.Write(p)
+}
+
+func (w *claudeDisconnectWriter) WriteString(s string) (int, error) {
+	return w.Write([]byte(s))
+}
+
+func (w *claudeDisconnectWriter) Flush() {
+	w.ResponseRecorder.Flush()
+	if w.cancelOn != "" && strings.Contains(w.Body.String(), w.cancelOn) {
+		w.cancel()
+		<-w.closed
+	}
+}
+
+type claudeDisconnectBody struct {
+	io.ReadCloser
+	closed  chan struct{}
+	once    sync.Once
+	onClose func()
+}
+
+func (b *claudeDisconnectBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(func() {
+		if b.onClose != nil {
+			b.onClose()
+		}
+		close(b.closed)
+	})
+	return err
+}
+
+func TestClaudeTerminalFinishesBeforeUpstreamEOF(t *testing.T) {
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+	for _, format := range []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAI, types.RelayFormatGemini, types.RelayFormatOpenAIResponses} {
+		t.Run(string(format), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/messages", nil)
+			c.Set("protocol_route", map[string]any{"source": "fixture"})
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "claude-test"}, RelayFormat: format, IsStream: true, DisablePing: true}
+			reader, writer := io.Pipe()
+			defer writer.Close()
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: reader}
+			go func() {
+				_, _ = io.WriteString(writer, `data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test","role":"assistant","usage":{"input_tokens":100,"cache_read_input_tokens":20}}}`+"\n\n"+
+					`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}`+"\n\n"+
+					`data: {"type":"message_stop"}`+"\n\n")
+			}()
+			finished := make(chan struct{})
+			var usage *dto.Usage
+			var apiErr *types.NewAPIError
+			go func() {
+				defer close(finished)
+				if format == types.RelayFormatOpenAIResponses {
+					usage, apiErr = ClaudeResponsesStreamHandler(c, resp, info)
+				} else {
+					usage, apiErr = ClaudeStreamHandler(c, resp, info)
+				}
+			}()
+			select {
+			case <-finished:
+			case <-time.After(time.Second):
+				cancel()
+				<-finished
+				t.Error("relay waited for transport EOF after message_stop")
+			}
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Equal(t, 100, usage.PromptTokens)
+			assert.Equal(t, 10, usage.CompletionTokens)
+			assert.Equal(t, 20, usage.PromptTokensDetails.CachedTokens)
+			assert.True(t, info.StreamStatus.IsSuccessful())
+		})
+	}
+}
+
+func TestClaudeStreamTerminalDeliveryFailures(t *testing.T) {
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+	for _, tc := range []struct {
+		name              string
+		format            types.RelayFormat
+		cancelOn, failOn  string
+		wantSuccess       bool
+		cancelBeforeFinal bool
+	}{
+		{name: "native cancel after terminal", format: types.RelayFormatClaude, cancelOn: "message_stop", wantSuccess: true},
+		{name: "native cancel after partial", format: types.RelayFormatClaude, cancelOn: "message_start"},
+		{name: "native terminal write failure", format: types.RelayFormatClaude, failOn: "message_stop"},
+		{name: "chat cancel before finalization", format: types.RelayFormatOpenAI, cancelBeforeFinal: true},
+		{name: "gemini cancel before finalization", format: types.RelayFormatGemini, cancelBeforeFinal: true},
+		{name: "responses cancel before finalization", format: types.RelayFormatOpenAIResponses, cancelBeforeFinal: true},
+		{name: "chat cancel before done", format: types.RelayFormatOpenAI, cancelOn: `"choices":[]`},
+		{name: "chat terminal write failure", format: types.RelayFormatOpenAI, failOn: "[DONE]"},
+		{name: "chat partial write failure", format: types.RelayFormatOpenAI, failOn: `"role":"assistant"`},
+		{name: "gemini write failure", format: types.RelayFormatGemini, failOn: "candidates"},
+		{name: "responses terminal write failure", format: types.RelayFormatOpenAIResponses, failOn: "response.completed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			reader, writer := io.Pipe()
+			defer writer.Close()
+			body := &claudeDisconnectBody{ReadCloser: reader, closed: make(chan struct{})}
+			if tc.cancelBeforeFinal {
+				body.onClose = cancel
+			}
+			client := &claudeDisconnectWriter{ResponseRecorder: httptest.NewRecorder(), cancel: cancel, closed: body.closed, cancelOn: tc.cancelOn, failOn: tc.failOn}
+			c, _ := gin.CreateTestContext(client)
+			c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/messages", nil)
+			c.Set("protocol_route", map[string]any{"source": "fixture"})
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "claude-test"}, RelayFormat: tc.format, IsStream: true, DisablePing: true, ShouldIncludeUsage: true}
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body}
+			go func() {
+				_, _ = io.WriteString(writer, `data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test","role":"assistant","usage":{"input_tokens":100,"cache_read_input_tokens":20}}}`+"\n\n"+
+					`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}`+"\n\n"+
+					`data: {"type":"message_stop"}`+"\n\n")
+				if tc.format != types.RelayFormatClaude || tc.cancelOn == "" {
+					_ = writer.Close()
+				}
+			}()
+			var usage *dto.Usage
+			var apiErr *types.NewAPIError
+			if tc.format == types.RelayFormatOpenAIResponses {
+				usage, apiErr = ClaudeResponsesStreamHandler(c, resp, info)
+			} else {
+				usage, apiErr = ClaudeStreamHandler(c, resp, info)
+			}
+			if tc.wantSuccess {
+				assert.Nil(t, apiErr)
+				assert.True(t, info.StreamStatus.IsSuccessful())
+				assert.Contains(t, client.Body.String(), "message_stop")
+			} else {
+				assert.NotNil(t, apiErr)
+				assert.False(t, info.StreamStatus.IsSuccessful())
+			}
+			require.NotNil(t, usage)
+			assert.Equal(t, 100, usage.PromptTokens)
+			assert.Equal(t, 20, usage.PromptTokensDetails.CachedTokens)
+		})
 	}
 }

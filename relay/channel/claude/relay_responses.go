@@ -160,6 +160,9 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 			}
 		}
 		if consumed {
+			if claudeResponse.Type == "message_stop" {
+				sr.Done()
+			}
 			return
 		}
 
@@ -178,6 +181,10 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 				sr.Stop(streamErr)
 				return
 			}
+		}
+		if claudeResponse.Type == "message_stop" {
+			// Responses completion is emitted after conversion finalization.
+			sr.Done()
 		}
 	})
 	if protocolRouting && streamErr == nil {
@@ -200,7 +207,9 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 		return claudeInfo.Usage, nil
 	}
 
-	HandleStreamFinalResponse(c, info, claudeInfo)
+	if err := HandleStreamFinalResponse(c, info, claudeInfo); err != nil {
+		return claudeInfo.Usage, err
+	}
 	openAIUsage := buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)
 	state.SetUsage(&openAIUsage)
 	finalResults, err := service.FinalizeStreamResponse(c, info, state)

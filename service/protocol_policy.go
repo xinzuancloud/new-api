@@ -124,7 +124,10 @@ func protocolRequiredFeatures(request any) (map[string]bool, error) {
 	if body == nil {
 		return nil, fmt.Errorf("protocol routing requires a request object")
 	}
-	required := protocolRequestFeatures(body)
+	required, err := protocolRequestFeatures(body)
+	if err != nil {
+		return nil, err
+	}
 	if err := protocolStatefulRoutingError(body, required); err != nil {
 		return nil, err
 	}
@@ -149,7 +152,7 @@ func protocolStatefulRoutingError(body map[string]any, required map[string]bool)
 	return fmt.Errorf("stateful/background routing is not supported for fields: %s", strings.Join(fields, ", "))
 }
 
-func protocolRequestFeatures(body map[string]any) map[string]bool {
+func protocolRequestFeatures(body map[string]any) (map[string]bool, error) {
 	required := map[string]bool{}
 	for key, feature := range map[string]string{
 		"stream": "stream", "parallel_tool_calls": "parallel_tools", "tools": "tools", "functions": "tools", "function_call": "tools", "tool_choice": "tools",
@@ -208,9 +211,11 @@ func protocolRequestFeatures(body map[string]any) map[string]bool {
 		shellExecution = classified
 	}
 	for _, key := range []string{"messages", "input", "system"} {
-		inspectProtocolContent(body[key], required, 0, shellExecution)
+		if err := inspectProtocolContent(body[key], required, 0, shellExecution, key); err != nil {
+			return nil, err
+		}
 	}
-	return required
+	return required, nil
 }
 
 // inspectProtocolTools reads protocol fields only; arbitrary JSON schemas and
@@ -277,15 +282,16 @@ func protocolValuePresent(value any) bool {
 
 // Inspect only protocol content containers, never tool schemas, metadata, or
 // strings containing user JSON. Unknown content fails closed.
-func inspectProtocolContent(value any, required map[string]bool, depth int, shellExecution string) {
+func inspectProtocolContent(value any, required map[string]bool, depth int, shellExecution, location string) error {
 	if depth > 32 {
-		required["unsupported_content"] = true
-		return
+		return fmt.Errorf("unsupported_content: protocol nesting exceeds the limit")
 	}
 	switch v := value.(type) {
 	case []any:
-		for _, item := range v {
-			inspectProtocolContent(item, required, depth+1, shellExecution)
+		for i, item := range v {
+			if err := inspectProtocolContent(item, required, depth+1, shellExecution, fmt.Sprintf("%s[%d]", location, i)); err != nil {
+				return err
+			}
 		}
 	case map[string]any:
 		kind, _ := v["type"].(string)
@@ -321,7 +327,14 @@ func inspectProtocolContent(value any, required map[string]bool, depth int, shel
 			if strings.HasPrefix(kind, "server_tool") || strings.HasPrefix(kind, "web_search") || strings.HasPrefix(kind, "computer") || strings.HasPrefix(kind, "mcp_") {
 				required["hosted_tools"] = true
 			} else {
-				required["unsupported_content"] = true
+				// Expose only known protocol vocabulary, never arbitrary client
+				// values. The location contains only canonical keys and indices.
+				diagnostic := "unrecognized"
+				switch kind {
+				case "compaction", "compaction_summary", "context_compaction", "compaction_trigger", "additional_tools", "agent_message", "encrypted_content", "reasoning_text", "summary_text":
+					diagnostic = kind
+				}
+				return fmt.Errorf("unsupported_content at %s (type=%s)", location, diagnostic)
 			}
 		}
 		if v["role"] == "tool" || v["role"] == "function" || protocolValuePresent(v["tool_calls"]) || protocolValuePresent(v["function_call"]) {
@@ -352,9 +365,19 @@ func inspectProtocolContent(value any, required map[string]bool, depth int, shel
 			required["reasoning"] = true
 		}
 		for _, key := range []string{"content", "output"} {
-			inspectProtocolContent(v[key], required, depth+1, shellExecution)
+			// Function output objects are application JSON, unlike arrays of
+			// typed protocol content. Do not interpret their keys as controls.
+			if key == "output" && (kind == "function_call_output" || kind == "custom_tool_call_output") {
+				if _, object := v[key].(map[string]any); object {
+					continue
+				}
+			}
+			if err := inspectProtocolContent(v[key], required, depth+1, shellExecution, location+"."+key); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 // ValidateProtocolConversion checks the fidelity of the currently implemented
@@ -378,7 +401,10 @@ func ValidateProtocolConversion(source, target types.RelayFormat, request any, l
 	if common.Unmarshal(data, &body) != nil || body == nil {
 		return fmt.Errorf("protocol conversion requires a request object")
 	}
-	required := protocolRequestFeatures(body)
+	required, err := protocolRequestFeatures(body)
+	if err != nil {
+		return err
+	}
 	if err := protocolStatefulRoutingError(body, required); err != nil {
 		return err
 	}
@@ -568,6 +594,11 @@ func protocolContentConversionLoss(value any, source, target types.RelayFormat, 
 		// Content/output contain protocol blocks; arguments/input schemas and textual
 		// tool output are opaque user data and must never be recursively inspected.
 		for _, field := range []string{"content", "output"} {
+			if field == "output" && (kind == "function_call_output" || kind == "custom_tool_call_output") {
+				if _, object := v[field].(map[string]any); object {
+					continue
+				}
+			}
 			if protocolContentConversionLoss(v[field], source, target, depth+1) {
 				return true
 			}

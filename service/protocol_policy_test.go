@@ -303,3 +303,35 @@ func TestProtocolShellContinuation(t *testing.T) {
 		require.ErrorContains(t, ValidateProtocolEndpointFeatures(endpoint, endpoint.Format, request), "unknown_tool_execution")
 	}
 }
+
+// Tool outputs may be application JSON. Protocol-looking keys inside that JSON
+// must not invent capabilities or conversion losses.
+func TestProtocolStructuredToolOutputIsOpaque(t *testing.T) {
+	endpoint := dto.ProtocolEndpoint{Format: types.RelayFormatOpenAI, Path: "/v1/chat/completions", Verified: true, Features: []string{"tools"}}
+	for _, output := range []any{
+		map[string]any{"type": "private-record", "content": map[string]any{"type": "image"}, "output": map[string]any{"type": "reasoning"}},
+		map[string]any{"type": "web_search_result", "tools": []any{map[string]any{"type": "web_search"}}},
+	} {
+		request := map[string]any{"model": "m", "input": []any{map[string]any{"type": "function_call_output", "call_id": "c", "output": output}}}
+		require.NoError(t, ValidateProtocolEndpointFeatures(endpoint, endpoint.Format, request))
+		require.NoError(t, ValidateProtocolConversion(types.RelayFormatOpenAIResponses, types.RelayFormatOpenAI, request, "safe"))
+	}
+	// Arrays are protocol content blocks, so images in tool results still require images.
+	request := map[string]any{"input": []any{map[string]any{"type": "function_call_output", "output": []any{map[string]any{"type": "input_image", "image_url": "private"}}}}}
+	require.ErrorContains(t, ValidateProtocolEndpointFeatures(endpoint, endpoint.Format, request), "images")
+}
+
+func TestProtocolUnsupportedContentDiagnostics(t *testing.T) {
+	endpoint := dto.ProtocolEndpoint{Format: types.RelayFormatOpenAIResponses, Path: "/responses", Verified: true}
+	for _, tc := range []struct{ kind, diagnostic string }{
+		{"compaction", "type=compaction"},
+		{"additional_tools", "type=additional_tools"},
+		{"private-user-controlled-value", "type=unrecognized"},
+	} {
+		request := map[string]any{"input": []any{map[string]any{"type": tc.kind, "encrypted_content": "private-payload"}}}
+		err := ValidateProtocolEndpointFeatures(endpoint, endpoint.Format, request)
+		require.ErrorContains(t, err, "unsupported_content at input[0]")
+		assert.Contains(t, err.Error(), tc.diagnostic)
+		assert.NotContains(t, err.Error(), "private")
+	}
+}
