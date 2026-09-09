@@ -150,3 +150,11 @@ Codex0.153.4 auto-review uses Responses Lite `additional_tools` with namespaced 
 SenseNova and Fire accepted tested DeepSeek V4 Flash Chat `json_schema` requests and returned valid schema output plus completed streams. The shared profiles declare `structured_output` only for that model's Chat endpoint. A valid sample does not prove every JSON Schema keyword or strict enforcement. Fire's native Responses schema test succeeded, but required namespace/custom tool probes returned text without tool calls, so those capabilities were not declared and native routing was not enabled on that evidence.
 
 Current evidence and configuration snapshots live in `/opt/ops-backups/protocol-compat-fix/`. Continue read-only monitoring. Do not run real probes or mutate configuration from the heartbeat.
+
+### Frontend deployment acceptance
+
+Prefer the verified release binary or a complete frontend build. A local `web/dist/index.html` may be an empty placeholder used for Go tests; its existence does not prove an actual frontend build. Never reuse it without verification. For a manual build, run `bun install --frozen-lockfile` and `bun run build` under `web/` before compiling the Go binary, and verify the resulting candidate's served assets.
+
+Before switching traffic, run `python3 /opt/new-api/ops/verify-web-assets.py http://<candidate-ip>:3000/`. It must find a nonempty HTML page, the SPA root and entry scripts; same-origin JS/CSS must return nonempty data with the expected MIME type (a200 HTML fallback for a missing script fails). Then open the candidate/public UI in a real browser and verify both homepage and dashboard rendering. Repeat the asset check against `https://newapi.xinzuancloud.com/` after cutover and during hourly read-only monitoring. If the asset check fails, do not declare the deployment healthy based only on `/api/status`.
+
+The264eff552 manual binary was superseded by its checksum-verified release binary; do not roll back to the manual image. Recovery evidence and the corrected deployment override are under `/opt/ops-backups/web-recovery/`.
