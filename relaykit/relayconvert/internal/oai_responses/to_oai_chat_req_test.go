@@ -257,6 +257,69 @@ func TestResponsesRequestToChatCompletionsRequestCustomToolCallPreservesRawShape
 	assert.Equal(t, "patch body", gjson.GetBytes(toolCalls[0].Custom, "input").String())
 }
 
+func TestPrepareResponsesLiteBridgeMovesNamespacedToolsAndHistoryToChatFunctions(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "model",
+		Input: mustRawMessage(t, []map[string]any{
+			{
+				"type": "additional_tools",
+				"id":   "at_1",
+				"role": "developer",
+				"tools": []any{map[string]any{
+					"type": "namespace",
+					"name": "functions",
+					"tools": []any{
+						map[string]any{"type": "custom", "name": "exec", "description": "Run code", "format": map[string]any{"type": "grammar", "syntax": "lark", "definition": "start: SOURCE\nSOURCE: /[\\s\\S]+/"}},
+						map[string]any{"type": "function", "name": "wait", "description": "Wait", "parameters": map[string]any{"type": "object", "properties": map[string]any{"cell_id": map[string]any{"type": "string"}}, "required": []any{"cell_id"}}},
+					},
+				}},
+			},
+			{"type": "message", "role": "developer", "content": []any{map[string]any{"type": "input_text", "text": "follow policy"}}},
+			{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "review"}}},
+			{"type": "custom_tool_call", "call_id": "call_exec", "namespace": "functions", "name": "exec", "input": "text('ok')"},
+			{"type": "custom_tool_call_output", "call_id": "call_exec", "output": "ok"},
+			{"type": "function_call", "call_id": "call_wait", "namespace": "functions", "name": "wait", "arguments": `{"cell_id":"1"}`},
+			{"type": "function_call_output", "call_id": "call_wait", "namespace": "functions", "name": "wait", "output": "done"},
+		}),
+	}
+
+	bridge, err := prepareResponsesLiteBridgeRequest(req)
+	require.NoError(t, err)
+	require.NotNil(t, bridge)
+
+	got, err := ResponsesRequestToChatCompletionsRequest(req)
+	require.NoError(t, err)
+	require.Len(t, got.Tools, 2)
+	customAlias := got.Tools[0].Function.Name
+	functionAlias := got.Tools[1].Function.Name
+	assert.NotEqual(t, customAlias, functionAlias)
+	assert.Equal(t, "string", got.Tools[0].Function.Parameters.(map[string]any)["properties"].(map[string]any)["input"].(map[string]any)["type"])
+	require.Len(t, got.Messages, 6)
+	assert.Equal(t, "system", got.Messages[0].Role)
+	assert.Equal(t, "user", got.Messages[1].Role)
+	customCalls := got.Messages[2].ParseToolCalls()
+	require.Len(t, customCalls, 1)
+	assert.Equal(t, customAlias, customCalls[0].Function.Name)
+	assert.JSONEq(t, `{"input":"text('ok')"}`, customCalls[0].Function.Arguments)
+	assert.Equal(t, "tool", got.Messages[3].Role)
+	functionCalls := got.Messages[4].ParseToolCalls()
+	require.Len(t, functionCalls, 1)
+	assert.Equal(t, functionAlias, functionCalls[0].Function.Name)
+	assert.JSONEq(t, `{"cell_id":"1"}`, functionCalls[0].Function.Arguments)
+	assert.Equal(t, "tool", got.Messages[5].Role)
+
+	custom, ok := bridge.ResolveAlias(customAlias)
+	require.True(t, ok)
+	assert.Equal(t, "custom", custom.Kind)
+	assert.Equal(t, "functions", custom.Namespace)
+	assert.Equal(t, "exec", custom.Name)
+	function, ok := bridge.ResolveAlias(functionAlias)
+	require.True(t, ok)
+	assert.Equal(t, "function", function.Kind)
+	assert.Equal(t, "functions", function.Namespace)
+	assert.Equal(t, "wait", function.Name)
+}
+
 func TestResponsesRequestToChatCompletionsRequestRejectsStatefulFields(t *testing.T) {
 	tests := []struct {
 		name string

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,6 +40,79 @@ func TestChatCompletionsResponseToResponsesPreservesTextToolCallsAndUsage(t *tes
 	assert.Equal(t, "call_1", resp.Output[1].CallId)
 	assert.Equal(t, "lookup", resp.Output[1].Name)
 	assert.Equal(t, `"{\"q\":\"x\"}"`, string(resp.Output[1].Arguments))
+}
+
+func TestChatCompletionsResponseToResponsesRestoresResponsesLiteTools(t *testing.T) {
+	bridge, err := convmeta.NewResponsesLiteBridge([]convmeta.ResponsesLiteTool{
+		{Alias: "newapi_lite_0_exec", Kind: "custom", Namespace: "functions", Name: "exec"},
+		{Alias: "newapi_lite_1_wait", Kind: "function", Namespace: "functions", Name: "wait"},
+	})
+	require.NoError(t, err)
+	message := dto.Message{Role: "assistant"}
+	message.SetToolCalls([]dto.ToolCallRequest{
+		{ID: "call_exec", Type: "function", Function: dto.FunctionRequest{Name: "newapi_lite_0_exec", Arguments: `{"input":"text('ok')"}`}},
+		{ID: "call_wait", Type: "function", Function: dto.FunctionRequest{Name: "newapi_lite_1_wait", Arguments: `{"cell_id":"1"}`}},
+	})
+	chat := &dto.OpenAITextResponse{
+		Id:    "chatcmpl_1",
+		Model: "model",
+		Choices: []dto.OpenAITextResponseChoice{{
+			Message:      message,
+			FinishReason: "tool_calls",
+		}},
+	}
+
+	resp, _, err := ChatCompletionsResponseToResponsesResponse(chat, "resp_1")
+	require.NoError(t, err)
+	require.NoError(t, RestoreResponsesLiteResponse(resp, bridge))
+	require.Len(t, resp.Output, 2)
+	assert.Equal(t, "custom_tool_call", resp.Output[0].Type)
+	assert.Equal(t, "functions", resp.Output[0].Namespace)
+	assert.Equal(t, "exec", resp.Output[0].Name)
+	assert.Equal(t, "text('ok')", resp.Output[0].Input)
+	assert.Empty(t, resp.Output[0].Arguments)
+	assert.Equal(t, responsesOutputTypeFunctionCall, resp.Output[1].Type)
+	assert.Equal(t, "functions", resp.Output[1].Namespace)
+	assert.Equal(t, "wait", resp.Output[1].Name)
+	assert.Equal(t, `"{\"cell_id\":\"1\"}"`, string(resp.Output[1].Arguments))
+}
+
+func TestChatCompletionsStreamToResponsesRestoresResponsesLiteCustomToolEvents(t *testing.T) {
+	bridge, err := convmeta.NewResponsesLiteBridge([]convmeta.ResponsesLiteTool{
+		{Alias: "newapi_lite_0_exec", Kind: "custom", Namespace: "functions", Name: "exec"},
+	})
+	require.NoError(t, err)
+	state := NewChatToResponsesStreamState("resp_1", "model")
+	state.SetResponsesLiteBridge(bridge)
+	toolIndex := 0
+
+	events := mustResponsesEventsFromChatChunk(t, state, &dto.ChatCompletionsStreamResponse{Choices: []dto.ChatCompletionsStreamResponseChoice{{
+		Delta: dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: []dto.ToolCallResponse{{Index: &toolIndex, ID: "call_exec", Type: "function", Function: dto.FunctionResponse{Arguments: `{"input":"text('ok')"}`}}}},
+	}}})
+	for _, event := range events {
+		assert.NotEqual(t, responsesEventFunctionArgsDelta, event.Type)
+	}
+	events = append(events, mustResponsesEventsFromChatChunk(t, state, &dto.ChatCompletionsStreamResponse{Choices: []dto.ChatCompletionsStreamResponseChoice{{
+		Delta: dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: []dto.ToolCallResponse{{Index: &toolIndex, Function: dto.FunctionResponse{Name: "newapi_lite_0_exec"}}}},
+	}}})...)
+	finishReason := "tool_calls"
+	events = append(events, mustResponsesEventsFromChatChunk(t, state, &dto.ChatCompletionsStreamResponse{Choices: []dto.ChatCompletionsStreamResponseChoice{{FinishReason: &finishReason}}})...)
+	events = append(events, FinalizeChatCompletionsStreamToResponses(state)...)
+
+	var eventTypes []string
+	for _, event := range events {
+		eventTypes = append(eventTypes, event.Type)
+	}
+	assert.Contains(t, eventTypes, "response.custom_tool_call_input.delta")
+	assert.Contains(t, eventTypes, "response.custom_tool_call_input.done")
+	for _, event := range events {
+		if event.Type == responsesEventOutputItemDone && event.Payload.Item != nil && event.Payload.Item.CallId == "call_exec" {
+			assert.Equal(t, "custom_tool_call", event.Payload.Item.Type)
+			assert.Equal(t, "functions", event.Payload.Item.Namespace)
+			assert.Equal(t, "exec", event.Payload.Item.Name)
+			assert.Equal(t, "text('ok')", event.Payload.Item.Input)
+		}
+	}
 }
 
 func TestChatCompletionsResponseToResponsesEmitsReasoningSummaryBeforeText(t *testing.T) {

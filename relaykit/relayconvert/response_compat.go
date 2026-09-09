@@ -18,6 +18,11 @@ type ChatToResponsesStreamEvent = oaichat.ChatToResponsesStreamEvent
 type ChatToResponsesStreamState = oaichat.ChatToResponsesStreamState
 type ResponsesToChatStreamState = oairesponses.ResponsesToChatStreamState
 type ResponsesBufferedAccumulator = oairesponses.ResponsesBufferedAccumulator
+type ResponsesLiteBridge = convmeta.ResponsesLiteBridge
+
+func PrepareResponsesLiteBridgeRequest(req *dto.OpenAIResponsesRequest) (*ResponsesLiteBridge, error) {
+	return oairesponses.PrepareResponsesLiteBridgeRequest(req)
+}
 
 // ClaudeHostedStreamBridge owns Anthropic server-tool input deltas while a
 // Claude stream is being converted to the Responses protocol.

@@ -93,6 +93,12 @@ func validateProtocolFeatures(endpoint dto.ProtocolEndpoint, required map[string
 	if endpoint.Format == types.RelayFormatOpenAI && required["context_editing"] {
 		return fmt.Errorf("OpenAI Chat endpoint cannot preserve context_management")
 	}
+	// Responses Lite additional_tools is an input extension that the native
+	// Responses adapters currently reject. It is supported only by the explicit
+	// Responses-to-Chat bridge, regardless of what another endpoint declares.
+	if endpoint.Format != types.RelayFormatOpenAI && required["responses_lite_bridge"] {
+		return fmt.Errorf("responses_lite_bridge requires an OpenAI Chat endpoint")
+	}
 	available := make(map[string]bool, len(endpoint.Features))
 	for _, feature := range endpoint.Features {
 		available[feature] = true
@@ -307,6 +313,9 @@ func inspectProtocolContent(value any, required map[string]bool, depth int, shel
 			required["video"] = true
 		case "tool_use", "tool_result", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "computer_call", "computer_call_output", "local_shell_call", "local_shell_call_output", "apply_patch_call", "apply_patch_call_output":
 			required["tools"] = true
+		case "additional_tools":
+			required["tools"] = true
+			required["responses_lite_bridge"] = true
 		case "tool_search_call", "tool_search_output":
 			required["tools"] = true
 			if v["execution"] != "client" {
@@ -331,7 +340,7 @@ func inspectProtocolContent(value any, required map[string]bool, depth int, shel
 				// values. The location contains only canonical keys and indices.
 				diagnostic := "unrecognized"
 				switch kind {
-				case "compaction", "compaction_summary", "context_compaction", "compaction_trigger", "additional_tools", "agent_message", "encrypted_content", "reasoning_text", "summary_text":
+				case "compaction", "compaction_summary", "context_compaction", "compaction_trigger", "agent_message", "encrypted_content", "reasoning_text", "summary_text":
 					diagnostic = kind
 				}
 				return fmt.Errorf("unsupported_content at %s (type=%s)", location, diagnostic)
@@ -384,7 +393,7 @@ func inspectProtocolContent(value any, required map[string]bool, depth int, shel
 // request converters independently of provider capability declarations. Native
 // requests keep their protocol semantics. An explicit allow policy accepts loss,
 // but cannot enable provider-hosted conversation state or background execution.
-func ValidateProtocolConversion(source, target types.RelayFormat, request any, lossPolicy string) error {
+func ValidateProtocolConversion(source, target types.RelayFormat, request any, lossPolicy string, targetFeatures ...string) error {
 	if !dto.IsProtocolRoutingFormat(source) || !dto.IsProtocolRoutingFormat(target) {
 		return fmt.Errorf("unsupported protocol conversion format")
 	}
@@ -407,6 +416,18 @@ func ValidateProtocolConversion(source, target types.RelayFormat, request any, l
 	}
 	if err := protocolStatefulRoutingError(body, required); err != nil {
 		return err
+	}
+	if required["responses_lite_bridge"] {
+		enabled := false
+		for _, feature := range targetFeatures {
+			if feature == "responses_lite_bridge" {
+				enabled = true
+				break
+			}
+		}
+		if target != types.RelayFormatOpenAI || !enabled {
+			return fmt.Errorf("responses_lite_bridge requires an enabled OpenAI Chat endpoint")
+		}
 	}
 	if source == target || lossPolicy == "allow" {
 		return nil
@@ -507,7 +528,7 @@ func ValidateProtocolConversion(source, target types.RelayFormat, request any, l
 		}
 	}
 	for _, field := range []string{"messages", "input", "system"} {
-		if protocolContentConversionLoss(body[field], source, target, 0) {
+		if protocolContentConversionLoss(body[field], source, target, 0, required["responses_lite_bridge"]) {
 			rejected[field] = true
 		}
 	}
@@ -537,29 +558,31 @@ func protocolConversionValuePresent(value any) bool {
 	}
 }
 
-func protocolContentConversionLoss(value any, source, target types.RelayFormat, depth int) bool {
+func protocolContentConversionLoss(value any, source, target types.RelayFormat, depth int, responsesLiteBridge bool) bool {
 	if depth > 32 {
 		return true
 	}
 	switch v := value.(type) {
 	case []any:
 		for _, item := range v {
-			if protocolContentConversionLoss(item, source, target, depth+1) {
+			if protocolContentConversionLoss(item, source, target, depth+1, responsesLiteBridge) {
 				return true
 			}
 		}
 	case map[string]any:
+		kind, _ := v["type"].(string)
+		if responsesLiteBridge && kind == "additional_tools" {
+			return false
+		}
 		for _, field := range []string{"signature", "encrypted_content", "reasoning_content", "reasoning", "cache_control", "citations", "annotations", "tools", "audio", "name"} {
 			if protocolConversionValuePresent(v[field]) {
 				// Function/tool call names are protocol data retained by these converters.
-				kind, _ := v["type"].(string)
-				if field == "name" && (kind == "tool_use" || kind == "function_call") {
+				if field == "name" && (kind == "tool_use" || kind == "function_call" || responsesLiteBridge && (kind == "custom_tool_call" || kind == "custom_tool_call_output")) {
 					continue
 				}
 				return true
 			}
 		}
-		kind, _ := v["type"].(string)
 		if source == types.RelayFormatClaude && kind == "tool_result" {
 			if v["is_error"] == true {
 				return true
@@ -599,7 +622,7 @@ func protocolContentConversionLoss(value any, source, target types.RelayFormat, 
 					continue
 				}
 			}
-			if protocolContentConversionLoss(v[field], source, target, depth+1) {
+			if protocolContentConversionLoss(v[field], source, target, depth+1, responsesLiteBridge) {
 				return true
 			}
 		}

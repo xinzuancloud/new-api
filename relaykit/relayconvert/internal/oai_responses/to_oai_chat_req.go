@@ -7,9 +7,12 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 )
+
+const responsesLiteAdditionalToolsType = "additional_tools"
 
 const (
 	responsesInputTypeFunctionCall       = "function_call"
@@ -108,6 +111,227 @@ func ResponsesRequestToChatCompletionsRequest(req *dto.OpenAIResponsesRequest) (
 	}
 
 	return out, nil
+}
+
+func prepareResponsesLiteBridgeRequest(req *dto.OpenAIResponsesRequest) (*convmeta.ResponsesLiteBridge, error) {
+	if req == nil || !rawJSONPresent(req.Input) || kitutil.GetJsonType(req.Input) != "array" {
+		return nil, nil
+	}
+	var input []map[string]any
+	if err := kitutil.Unmarshal(req.Input, &input); err != nil {
+		return nil, fmt.Errorf("invalid Responses Lite input: %w", err)
+	}
+	additionalIndex := -1
+	for index, item := range input {
+		if strings.TrimSpace(kitutil.Interface2String(item["type"])) != responsesLiteAdditionalToolsType {
+			continue
+		}
+		if additionalIndex >= 0 {
+			return nil, errors.New("Responses Lite input contains multiple additional_tools items")
+		}
+		additionalIndex = index
+	}
+	if additionalIndex < 0 {
+		return nil, nil
+	}
+
+	additionalTools, ok := input[additionalIndex]["tools"].([]any)
+	if !ok || len(additionalTools) == 0 {
+		return nil, errors.New("Responses Lite additional_tools must contain tools")
+	}
+	var existingTools []any
+	if rawJSONPresent(req.Tools) {
+		if kitutil.GetJsonType(req.Tools) != "array" || kitutil.Unmarshal(req.Tools, &existingTools) != nil {
+			return nil, errors.New("Responses Lite top-level tools must be an array")
+		}
+	}
+	usedNames := make(map[string]bool, len(existingTools)+len(additionalTools))
+	for _, rawTool := range existingTools {
+		if tool, ok := rawTool.(map[string]any); ok {
+			usedNames[strings.TrimSpace(kitutil.Interface2String(tool["name"]))] = true
+		}
+	}
+
+	convertedTools := append([]any(nil), existingTools...)
+	mappings := make([]convmeta.ResponsesLiteTool, 0, len(additionalTools))
+	toolNumber := 0
+	addTool := func(rawTool any, namespace string) error {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			return errors.New("Responses Lite tool declaration must be an object")
+		}
+		kind := strings.TrimSpace(kitutil.Interface2String(tool["type"]))
+		name := strings.TrimSpace(kitutil.Interface2String(tool["name"]))
+		if name == "" || (kind != "function" && kind != "custom") {
+			return fmt.Errorf("Responses Lite tool type %q cannot be bridged", kind)
+		}
+		aliasBase := responsesLiteSafeToolName(name)
+		alias := fmt.Sprintf("bridge_%d_%s", toolNumber, aliasBase)
+		for usedNames[alias] {
+			toolNumber++
+			alias = fmt.Sprintf("bridge_%d_%s", toolNumber, aliasBase)
+		}
+		usedNames[alias] = true
+		toolNumber++
+
+		converted := map[string]any{
+			"type": "function",
+			"name": alias,
+		}
+		if description := kitutil.Interface2String(tool["description"]); description != "" {
+			converted["description"] = description
+		}
+		if kind == "function" {
+			parameters, ok := tool["parameters"].(map[string]any)
+			if !ok {
+				return fmt.Errorf("Responses Lite function %q is missing parameters", name)
+			}
+			converted["parameters"] = parameters
+			if strict, ok := tool["strict"].(bool); ok {
+				converted["strict"] = strict
+			}
+		} else {
+			format, ok := tool["format"].(map[string]any)
+			if !ok || strings.TrimSpace(kitutil.Interface2String(format["type"])) != "grammar" || strings.TrimSpace(kitutil.Interface2String(format["syntax"])) == "" || strings.TrimSpace(kitutil.Interface2String(format["definition"])) == "" {
+				return fmt.Errorf("Responses Lite custom tool %q requires a grammar format", name)
+			}
+			converted["parameters"] = map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"input": map[string]any{"type": "string", "minLength": 1},
+				},
+				"required": []any{"input"},
+			}
+			description := strings.TrimSpace(kitutil.Interface2String(converted["description"]))
+			instruction := "Return the complete raw custom-tool input in the input string field."
+			if description == "" {
+				converted["description"] = instruction
+			} else {
+				converted["description"] = description + "\n\n" + instruction
+			}
+		}
+		convertedTools = append(convertedTools, converted)
+		mappings = append(mappings, convmeta.ResponsesLiteTool{Alias: alias, Kind: kind, Namespace: namespace, Name: name})
+		return nil
+	}
+
+	for _, rawTool := range additionalTools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			return nil, errors.New("Responses Lite tool declaration must be an object")
+		}
+		if strings.TrimSpace(kitutil.Interface2String(tool["type"])) != "namespace" {
+			if err := addTool(rawTool, ""); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		namespace := strings.TrimSpace(kitutil.Interface2String(tool["name"]))
+		children, ok := tool["tools"].([]any)
+		if namespace == "" || !ok || len(children) == 0 {
+			return nil, errors.New("Responses Lite namespace must contain named tools")
+		}
+		for _, child := range children {
+			if nested, ok := child.(map[string]any); ok && strings.TrimSpace(kitutil.Interface2String(nested["type"])) == "namespace" {
+				return nil, errors.New("nested Responses Lite namespaces cannot be bridged")
+			}
+			if err := addTool(child, namespace); err != nil {
+				return nil, err
+			}
+		}
+	}
+	bridge, err := convmeta.NewResponsesLiteBridge(mappings)
+	if err != nil {
+		return nil, err
+	}
+
+	bridgedInput := make([]map[string]any, 0, len(input)-1)
+	for index, item := range input {
+		if index == additionalIndex {
+			continue
+		}
+		kind := strings.TrimSpace(kitutil.Interface2String(item["type"]))
+		switch kind {
+		case responsesInputTypeCustomToolCall:
+			namespace := strings.TrimSpace(kitutil.Interface2String(item["namespace"]))
+			name := strings.TrimSpace(kitutil.Interface2String(item["name"]))
+			alias, ok := bridge.AliasFor("custom", namespace, name)
+			if !ok {
+				return nil, fmt.Errorf("Responses Lite custom tool history references an undeclared tool")
+			}
+			customInput, ok := item["input"].(string)
+			if !ok || customInput == "" {
+				return nil, fmt.Errorf("Responses Lite custom tool history has invalid input")
+			}
+			arguments, err := kitutil.Marshal(map[string]any{"input": customInput})
+			if err != nil {
+				return nil, err
+			}
+			item["type"] = responsesInputTypeFunctionCall
+			item["name"] = alias
+			item["arguments"] = string(arguments)
+			delete(item, "namespace")
+			delete(item, "input")
+		case responsesInputTypeCustomToolOutput:
+			item["type"] = responsesInputTypeFunctionCallOutput
+			delete(item, "namespace")
+			delete(item, "name")
+		case responsesInputTypeFunctionCall:
+			namespace := strings.TrimSpace(kitutil.Interface2String(item["namespace"]))
+			if namespace != "" {
+				name := strings.TrimSpace(kitutil.Interface2String(item["name"]))
+				alias, ok := bridge.AliasFor("function", namespace, name)
+				if !ok {
+					return nil, fmt.Errorf("Responses Lite function history references an undeclared tool")
+				}
+				item["name"] = alias
+				delete(item, "namespace")
+			}
+		case responsesInputTypeFunctionCallOutput:
+			delete(item, "namespace")
+			delete(item, "name")
+		case "message":
+			// Chat-compatible providers commonly implement the older role set.
+			// A Responses developer instruction has the same precedence purpose as
+			// a Chat system instruction, so preserve it through that role.
+			if strings.TrimSpace(kitutil.Interface2String(item["role"])) == "developer" {
+				item["role"] = "system"
+			}
+		}
+		bridgedInput = append(bridgedInput, item)
+	}
+	req.Input, err = kitutil.Marshal(bridgedInput)
+	if err != nil {
+		return nil, err
+	}
+	req.Tools, err = kitutil.Marshal(convertedTools)
+	if err != nil {
+		return nil, err
+	}
+	return bridge, nil
+}
+
+func PrepareResponsesLiteBridgeRequest(req *dto.OpenAIResponsesRequest) (*convmeta.ResponsesLiteBridge, error) {
+	return prepareResponsesLiteBridgeRequest(req)
+}
+
+func responsesLiteSafeToolName(name string) string {
+	var builder strings.Builder
+	for _, char := range name {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' {
+			builder.WriteRune(char)
+		} else {
+			builder.WriteByte('_')
+		}
+		if builder.Len() >= 48 {
+			break
+		}
+	}
+	if builder.Len() == 0 {
+		return "tool"
+	}
+	return builder.String()
 }
 
 func validateResponsesRequestChatUnsupportedFields(req *dto.OpenAIResponsesRequest) error {

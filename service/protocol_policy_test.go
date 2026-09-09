@@ -325,7 +325,6 @@ func TestProtocolUnsupportedContentDiagnostics(t *testing.T) {
 	endpoint := dto.ProtocolEndpoint{Format: types.RelayFormatOpenAIResponses, Path: "/responses", Verified: true}
 	for _, tc := range []struct{ kind, diagnostic string }{
 		{"compaction", "type=compaction"},
-		{"additional_tools", "type=additional_tools"},
 		{"private-user-controlled-value", "type=unrecognized"},
 	} {
 		request := map[string]any{"input": []any{map[string]any{"type": tc.kind, "encrypted_content": "private-payload"}}}
@@ -334,4 +333,41 @@ func TestProtocolUnsupportedContentDiagnostics(t *testing.T) {
 		assert.Contains(t, err.Error(), tc.diagnostic)
 		assert.NotContains(t, err.Error(), "private")
 	}
+}
+
+func TestProtocolResponsesLiteRequiresExplicitChatBridge(t *testing.T) {
+	request := map[string]any{
+		"stream": true,
+		"input": []any{map[string]any{
+			"type": "additional_tools",
+			"tools": []any{map[string]any{
+				"type": "namespace",
+				"name": "functions",
+				"tools": []any{
+					map[string]any{"type": "custom", "name": "exec", "format": map[string]any{"type": "grammar", "syntax": "lark", "definition": "start: SOURCE\nSOURCE: /[\\s\\S]+/"}},
+					map[string]any{"type": "function", "name": "wait", "parameters": map[string]any{"type": "object"}},
+				},
+			}},
+		}},
+		"text": map[string]any{"format": map[string]any{"type": "json_schema", "schema": map[string]any{"type": "object"}}},
+	}
+	policy := &dto.ProtocolRoutingSettings{Enabled: true, Defaults: dto.ProtocolModelPolicy{
+		EntryFormats: []types.RelayFormat{types.RelayFormatOpenAIResponses},
+		Endpoints: []dto.ProtocolEndpoint{
+			{Format: types.RelayFormatOpenAIResponses, Path: "/responses", Verified: true, Features: []string{"stream", "tools", "structured_output", "responses_lite_bridge"}},
+			{Format: types.RelayFormatOpenAI, Path: "/chat/completions", Verified: true, Features: []string{"stream", "tools", "structured_output"}},
+		},
+	}}
+
+	candidates, err := BuildProtocolCandidates(policy, "model", types.RelayFormatOpenAIResponses, request)
+	require.Error(t, err)
+	assert.Empty(t, candidates)
+	assert.Contains(t, err.Error(), "responses_lite_bridge")
+
+	policy.Defaults.Endpoints[1].Features = append(policy.Defaults.Endpoints[1].Features, "responses_lite_bridge")
+	candidates, err = BuildProtocolCandidates(policy, "model", types.RelayFormatOpenAIResponses, request)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	assert.Equal(t, types.RelayFormat(types.RelayFormatOpenAI), candidates[0].Endpoint.Format)
+	require.NoError(t, ValidateProtocolConversion(types.RelayFormatOpenAIResponses, types.RelayFormatOpenAI, request, "safe", "responses_lite_bridge"))
 }

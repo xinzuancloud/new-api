@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 )
 
@@ -101,6 +102,53 @@ func ChatCompletionsResponseToResponsesResponse(resp *dto.OpenAITextResponse, id
 	}
 
 	return out, usage, nil
+}
+
+func RestoreResponsesLiteResponse(resp *dto.OpenAIResponsesResponse, bridge *convmeta.ResponsesLiteBridge) error {
+	if resp == nil || bridge == nil {
+		return nil
+	}
+	for index := range resp.Output {
+		if err := restoreResponsesLiteOutput(&resp.Output[index], bridge); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func restoreResponsesLiteOutput(output *dto.ResponsesOutput, bridge *convmeta.ResponsesLiteBridge) error {
+	if output == nil || output.Type != responsesOutputTypeFunctionCall {
+		return nil
+	}
+	tool, ok := bridge.ResolveAlias(output.Name)
+	if !ok {
+		return nil
+	}
+	output.Name = tool.Name
+	output.Namespace = tool.Namespace
+	if tool.Kind == "function" {
+		return nil
+	}
+	input, err := responsesLiteCustomInput(dto.ResponsesArgumentsString(output.Arguments))
+	if err != nil {
+		return err
+	}
+	output.Type = "custom_tool_call"
+	output.Input = input
+	output.Arguments = nil
+	return nil
+}
+
+func responsesLiteCustomInput(arguments string) (string, error) {
+	var payload map[string]any
+	if err := kitutil.Unmarshal([]byte(arguments), &payload); err != nil {
+		return "", fmt.Errorf("Responses Lite custom tool returned invalid arguments")
+	}
+	input, ok := payload["input"].(string)
+	if !ok || input == "" || len(payload) != 1 {
+		return "", fmt.Errorf("Responses Lite custom tool must return only a non-empty input string")
+	}
+	return input, nil
 }
 
 func chatAnnotationsToResponses(raw []byte) ([]any, error) {

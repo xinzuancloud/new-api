@@ -35,6 +35,7 @@ export const PROTOCOL_FEATURES = [
   'reasoning',
   'hosted_tools',
   'context_editing',
+  'responses_lite_bridge',
   'stateful',
   'background',
 ] as const

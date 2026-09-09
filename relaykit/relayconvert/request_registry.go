@@ -529,7 +529,7 @@ func convertOpenAIResponsesRequestToGeminiChat(c context.Context, info convmeta.
 	return oairesponses.OpenAIResponsesRequestToGeminiChat(c, &prepared, info)
 }
 
-func convertResponsesRequestToChat(_ context.Context, _ convmeta.Meta, request any) (any, error) {
+func convertResponsesRequestToChat(_ context.Context, info convmeta.Meta, request any) (any, error) {
 	responsesRequest, ok := request.(*dto.OpenAIResponsesRequest)
 	if !ok {
 		if value, ok := request.(dto.OpenAIResponsesRequest); ok {
@@ -538,6 +538,19 @@ func convertResponsesRequestToChat(_ context.Context, _ convmeta.Meta, request a
 	}
 	if responsesRequest == nil {
 		return nil, fmt.Errorf("expected OpenAI responses request, got %T", request)
+	}
+	options := convmeta.OptionsOf(info)
+	bridge, err := oairesponses.PrepareResponsesLiteBridgeRequest(responsesRequest)
+	if err != nil {
+		return nil, err
+	}
+	if bridge != nil {
+		if !options.ResponsesLiteBridgeEnabled {
+			return nil, fmt.Errorf("Responses Lite bridge is not enabled for this endpoint")
+		}
+		options.ResponsesLiteBridge = bridge
+	} else {
+		options.ResponsesLiteBridge = nil
 	}
 	return oairesponses.ResponsesRequestToChatCompletionsRequest(responsesRequest)
 }

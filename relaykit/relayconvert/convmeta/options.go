@@ -1,6 +1,11 @@
 package convmeta
 
-import "github.com/QuantumNous/new-api/relaykit/types"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/QuantumNous/new-api/relaykit/types"
+)
 
 // Options is the per-request snapshot of host configuration that converters
 // consult. The host fills it from its settings system when constructing the
@@ -17,6 +22,14 @@ type Options struct {
 	// conversion never reject regardless of this field.
 	ToolLossPolicy types.ConversionLossPolicy
 
+	// ResponsesLiteBridgeEnabled is set only for an administrator-verified
+	// Chat endpoint that may receive a Responses Lite request through the
+	// request/response bridge. ResponsesLiteBridge contains request-scoped tool
+	// aliases created during request conversion and consumed during response
+	// conversion.
+	ResponsesLiteBridgeEnabled bool
+	ResponsesLiteBridge        *ResponsesLiteBridge
+
 	// OpenRouterDialect marks the upstream as OpenRouter's OpenAI-compatible
 	// surface, which accepts extra fields (reasoning config, cache_control on
 	// system parts) that converters emit only for that dialect. The host sets
@@ -31,6 +44,64 @@ type Options struct {
 	// PreserveEffortTail reports real model IDs whose names already end in an
 	// effort-like token (for example qwen-max). Nil means "never preserve".
 	PreserveEffortTail func(modelName string) bool
+}
+
+type ResponsesLiteTool struct {
+	Alias     string
+	Kind      string
+	Namespace string
+	Name      string
+}
+
+type ResponsesLiteBridge struct {
+	byAlias    map[string]ResponsesLiteTool
+	byOriginal map[string]string
+}
+
+func NewResponsesLiteBridge(tools []ResponsesLiteTool) (*ResponsesLiteBridge, error) {
+	bridge := &ResponsesLiteBridge{
+		byAlias:    make(map[string]ResponsesLiteTool, len(tools)),
+		byOriginal: make(map[string]string, len(tools)),
+	}
+	for _, tool := range tools {
+		tool.Alias = strings.TrimSpace(tool.Alias)
+		tool.Kind = strings.TrimSpace(tool.Kind)
+		tool.Namespace = strings.TrimSpace(tool.Namespace)
+		tool.Name = strings.TrimSpace(tool.Name)
+		if tool.Alias == "" || tool.Name == "" || (tool.Kind != "function" && tool.Kind != "custom") {
+			return nil, fmt.Errorf("invalid Responses Lite tool mapping")
+		}
+		if _, exists := bridge.byAlias[tool.Alias]; exists {
+			return nil, fmt.Errorf("duplicate Responses Lite tool alias")
+		}
+		original := responsesLiteOriginalKey(tool.Kind, tool.Namespace, tool.Name)
+		if _, exists := bridge.byOriginal[original]; exists {
+			return nil, fmt.Errorf("duplicate Responses Lite tool identity")
+		}
+		bridge.byAlias[tool.Alias] = tool
+		bridge.byOriginal[original] = tool.Alias
+	}
+	return bridge, nil
+}
+
+func (b *ResponsesLiteBridge) ResolveAlias(alias string) (ResponsesLiteTool, bool) {
+	if b == nil {
+		return ResponsesLiteTool{}, false
+	}
+	tool, ok := b.byAlias[strings.TrimSpace(alias)]
+	return tool, ok
+}
+
+func (b *ResponsesLiteBridge) AliasFor(kind, namespace, name string) (string, bool) {
+	if b == nil {
+		return "", false
+	}
+	alias, ok := b.byOriginal[responsesLiteOriginalKey(kind, namespace, name)]
+	return alias, ok
+}
+
+func responsesLiteOriginalKey(kind, namespace, name string) string {
+	return strings.TrimSpace(kind) + "\x00" + strings.TrimSpace(namespace) + "\x00" + strings.TrimSpace(name)
 }
 
 type ClaudeOptions struct {

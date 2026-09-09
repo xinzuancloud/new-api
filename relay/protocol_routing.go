@@ -104,11 +104,20 @@ func PrepareProtocolRequest(c *gin.Context, info *relaycommon.RelayInfo) (*Prepa
 		if err := applyProtocolSystemPrompt(c, info, copyRequest); err != nil {
 			return capabilityError("cannot preserve configured system prompt")
 		}
-		if err := service.ValidateProtocolConversion(info.RelayFormat, candidate.Endpoint.Format, source, candidate.LossPolicy); err != nil {
+		if err := service.ValidateProtocolConversion(info.RelayFormat, candidate.Endpoint.Format, source, candidate.LossPolicy, candidate.Endpoint.Features...); err != nil {
 			rejectionReason = err.Error()
 			continue
 		}
-		info.ConvOptions().ToolLossPolicy = types.ConversionLossPolicy(candidate.LossPolicy)
+		options := info.ConvOptions()
+		options.ToolLossPolicy = types.ConversionLossPolicy(candidate.LossPolicy)
+		options.ResponsesLiteBridgeEnabled = false
+		options.ResponsesLiteBridge = nil
+		for _, feature := range candidate.Endpoint.Features {
+			if feature == "responses_lite_bridge" {
+				options.ResponsesLiteBridgeEnabled = true
+				break
+			}
+		}
 		result, conversionErr := service.ConvertRequest(c, info, candidate.Endpoint.Format, copyRequest)
 		if conversionErr != nil {
 			continue

@@ -338,7 +338,9 @@ type ResponsesOutput struct {
 	Result              string                          `json:"result,omitempty"`
 	CallId              string                          `json:"call_id,omitempty"`
 	Name                string                          `json:"name,omitempty"`
+	Namespace           string                          `json:"namespace,omitempty"`
 	Arguments           json.RawMessage                 `json:"arguments,omitempty"`
+	Input               string                          `json:"input,omitempty"`
 	Action              json.RawMessage                 `json:"action,omitempty"`
 	Queries             json.RawMessage                 `json:"queries,omitempty"`
 	Results             json.RawMessage                 `json:"results,omitempty"`
@@ -518,6 +520,7 @@ type ResponsesStreamResponse struct {
 	Message         string                   `json:"message,omitempty"`
 	Param           string                   `json:"param,omitempty"`
 	Delta           string                   `json:"delta,omitempty"`
+	Input           string                   `json:"input,omitempty"`
 	Arguments       *string                  `json:"arguments,omitempty"`
 	Name            string                   `json:"name,omitempty"`
 	Text            *string                  `json:"text,omitempty"`

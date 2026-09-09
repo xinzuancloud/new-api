@@ -691,6 +691,78 @@ func TestConvertRequestRejectsUnregisteredExplicitPath(t *testing.T) {
 	assert.Contains(t, err.Error(), "from claude to embedding is not registered")
 }
 
+func TestConvertRequestResponsesLiteBridgeRequiresOptInAndPreservesTools(t *testing.T) {
+	stream := true
+	request := &dto.OpenAIResponsesRequest{
+		Model:             "model",
+		Stream:            &stream,
+		ToolChoice:        mustRawMessage(t, "auto"),
+		ParallelToolCalls: mustRawMessage(t, false),
+		Reasoning:         &dto.Reasoning{Effort: "low", Summary: "auto", Context: mustRawMessage(t, "all_turns")},
+		Text: mustRawMessage(t, map[string]any{
+			"verbosity": "low",
+			"format":    map[string]any{"type": "json_schema", "name": "codex_output_schema", "strict": false, "schema": map[string]any{"type": "object"}},
+		}),
+		Input: mustRawMessage(t, []any{
+			map[string]any{
+				"type": "additional_tools",
+				"role": "developer",
+				"tools": []any{map[string]any{
+					"type": "namespace",
+					"name": "functions",
+					"tools": []any{
+						map[string]any{"type": "custom", "name": "exec", "format": map[string]any{"type": "grammar", "syntax": "lark", "definition": "start: SOURCE\nSOURCE: /[\\s\\S]+/"}},
+						map[string]any{"type": "function", "name": "wait", "parameters": map[string]any{"type": "object"}},
+					},
+				}},
+			},
+			map[string]any{"type": "message", "role": "developer", "content": []any{map[string]any{"type": "input_text", "text": "follow policy"}}},
+			map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "review"}}},
+		}),
+	}
+
+	_, err := ConvertRequest(nil, &convmeta.Values{}, types.RelayFormatOpenAI, request)
+	require.ErrorContains(t, err, "Responses Lite bridge is not enabled")
+
+	request.Input = mustRawMessage(t, []any{
+		map[string]any{
+			"type": "additional_tools",
+			"role": "developer",
+			"tools": []any{map[string]any{
+				"type": "namespace",
+				"name": "functions",
+				"tools": []any{
+					map[string]any{"type": "custom", "name": "exec", "format": map[string]any{"type": "grammar", "syntax": "lark", "definition": "start: SOURCE\nSOURCE: /[\\s\\S]+/"}},
+					map[string]any{"type": "function", "name": "wait", "parameters": map[string]any{"type": "object"}},
+				},
+			}},
+		},
+		map[string]any{"type": "message", "role": "developer", "content": []any{map[string]any{"type": "input_text", "text": "follow policy"}}},
+		map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "review"}}},
+	})
+	info := &convmeta.Values{Options: &convmeta.Options{ResponsesLiteBridgeEnabled: true}}
+	result, err := ConvertRequest(nil, info, types.RelayFormatOpenAI, request)
+	require.NoError(t, err)
+	out := result.Value.(*dto.GeneralOpenAIRequest)
+	require.Len(t, out.Tools, 2)
+	assert.Equal(t, "function", out.Tools[0].Type)
+	assert.Equal(t, "function", out.Tools[1].Type)
+	assert.NotEmpty(t, out.Tools[0].Function.Name)
+	assert.NotEqual(t, out.Tools[0].Function.Name, out.Tools[1].Function.Name)
+	require.Len(t, out.Messages, 2)
+	assert.Equal(t, "system", out.Messages[0].Role)
+	assert.Equal(t, "user", out.Messages[1].Role)
+	require.NotNil(t, out.ResponseFormat)
+	assert.Equal(t, "json_schema", out.ResponseFormat.Type)
+	assert.Equal(t, "low", out.ReasoningEffort)
+	require.NotNil(t, out.Stream)
+	assert.True(t, *out.Stream)
+	require.NotNil(t, info.Options.ResponsesLiteBridge)
+	custom, ok := info.Options.ResponsesLiteBridge.ResolveAlias(out.Tools[0].Function.Name)
+	require.True(t, ok)
+	assert.Equal(t, convmeta.ResponsesLiteTool{Alias: out.Tools[0].Function.Name, Kind: "custom", Namespace: "functions", Name: "exec"}, custom)
+}
+
 func mustRawMessage(t *testing.T, value any) []byte {
 	t.Helper()
 	raw, err := kitutil.Marshal(value)
