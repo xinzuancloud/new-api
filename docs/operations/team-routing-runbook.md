@@ -41,7 +41,7 @@ Plus 的 Kimi 订阅白名单是 `kimi-for-coding`、`kimi-k3-256k`。Plus 火�
 3. 生产端禁止复制凭据。自动审批曾拒绝额外复制完整数据库/.env及在生产PG创建测试角色；改用本机独立环境。原每日备份保留，本次无schema/driver/migration改动。
 4. `python3 ops/team-routing-configure.py --database new-api` 预览；`--apply` 保存仅含渠道元数据与相关设置的600权限快照后事务更新，默认保持天翼关闭。并发管理员修改会导致事务中止。
 5. 使用独立 `docker-compose.override.yml` 镜像覆盖文件启动已验证版本，不修改原 `.env`。原镜像保留。单实例切换可能短暂中断，不宣称零停机。
-6. 核对版本、健康、UI、白名单、价格、真实被动流量和监测工具，最后才执行 `--apply --enable-metered`。
+6. 核对版本、健康、UI、白名单、价格、真实被动流量和监测工具。天翼保持关闭，只有用户明确决定结束观察并启用时才执行 `--apply --enable-metered`。
 7. 回滚程序：用原 Compose 文件重建原官方应用（不要加载自定义覆盖文件）。需要恢复配置时只恢复本次快照中变动的字段和选项；不要恢复整库覆盖新消费记录/用户余额。紧急情况下先关闭天翼。
 
 ## 持续监测
@@ -51,8 +51,10 @@ Plus 的 Kimi 订阅白名单是 `kimi-for-coding`、`kimi-k3-256k`。Plus 火�
 比较基线与后续窗口：
 
 - HTTP 429/5xx、上游不完整流、`client_gone` 下游取消、缺少流状态的消费数。`client_gone` 单独计入 `downstream_cancellations`，不会触发上游流故障告警；其他错误终止计入 `upstream_incomplete_streams`。
+- `auth_http_status_counts` 单独汇总登录链和 Refresh 端点；任一认证 429 或 5xx 都会告警，避免模型接口流量掩盖页面刷新与登录回归。
 - `native_empty_stream_retries` 统计原生 Claude 上游在尚未向客户端发送任何事件时的同端点重试次数、最终完成数和失败数；已经向客户端输出过内容的流不得重试。
 - 按 request_id 关联的错误尝试和最终消费；一个请求可能有多个错误，不能直接计算日志错误条数比例。
+- `provider_rate_limits` 统计触发限流的业务请求、429 尝试、恢复、耗尽和单请求最大尝试数；`account_load` 按匿名渠道 ID 汇总成功数、错误数与输入 Token，用于判断同一供应商内是否仍负载偏斜。
 - 各分组/模型/供应商消费、网关记录的P95耗时和入口HTTP P95、缓存读取Token、内部配额。
 - 非VIP进入天翼、default出现额外模型、出现未列入分组策略的标签、重复渠道/向前回退，均应优先检查。
 - 天翼消费增长须按内部记账与实际供应商账单分开解释；当前没有凭据或价格证据支持宣称自动约束真实供应商月账单。

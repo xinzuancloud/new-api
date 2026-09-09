@@ -25,6 +25,29 @@ SET LOCAL statement_timeout='15s';
 SELECT json_build_object('kind','routes','group',l."group",'tag',coalesce(c.tag,'untagged'),'model',model_name,'consume_logs',count(*),'quota',sum(quota),'input_tokens',sum(prompt_tokens),'cache_read_tokens',sum(coalesce((nullif(l.other,'')::jsonb->>'cache_tokens')::numeric,0)),'p95_seconds',percentile_cont(.95) WITHIN GROUP(ORDER BY use_time),'upstream_incomplete_streams',count(*) FILTER(WHERE nullif(l.other,'')::jsonb#>>'{{stream_status,status}}'='error' AND nullif(l.other,'')::jsonb#>>'{{stream_status,end_reason}}' IS DISTINCT FROM 'client_gone'),'downstream_cancellations',count(*) FILTER(WHERE nullif(l.other,'')::jsonb#>>'{{stream_status,end_reason}}'='client_gone'),'stream_metadata_missing',count(*) FILTER(WHERE is_stream AND nullif(l.other,'')::jsonb->'stream_status' IS NULL)) FROM logs l LEFT JOIN channels c ON c.id=l.channel_id WHERE l.type=2 AND created_at BETWEEN {start} AND {end} GROUP BY l."group",c.tag,model_name;
 SELECT json_build_object('kind','attempts','channel',channel_id,'type',type,'count',count(*)) FROM logs l WHERE type IN(2,5) AND created_at BETWEEN {start} AND {end} GROUP BY channel_id,type;
 WITH requests AS(SELECT request_id,bool_or(type=2) AS consumed,count(*) FILTER(WHERE type=5) AS errors FROM logs l WHERE type IN(2,5) AND request_id<>'' AND created_at BETWEEN {start} AND {end} GROUP BY request_id) SELECT json_build_object('kind','correlation','requests',count(*),'recovered_after_errors',count(*) FILTER(WHERE consumed AND errors>0),'error_only_requests',count(*) FILTER(WHERE NOT consumed),'error_attempts',sum(errors)) FROM requests;
+WITH request_attempts AS (
+ SELECT request_id,max(l."group") AS "group",max(model_name) AS model,
+  bool_or(type=2) AS completed,
+  count(*) FILTER(WHERE type=5 AND (content ILIKE '%tpm/rpm%' OR content ILIKE '%status_code=429%' OR content ILIKE '%status code: 429%')) AS rate_limit_attempts
+ FROM logs l
+ WHERE type IN(2,5) AND request_id<>'' AND created_at BETWEEN {start} AND {end}
+ GROUP BY request_id
+)
+SELECT json_build_object('kind','provider_rate_limits','group',"group",'model',model,
+ 'requests',count(*),'rate_limited_requests',count(*) FILTER(WHERE rate_limit_attempts>0),
+ 'rate_limit_attempts',coalesce(sum(rate_limit_attempts),0),
+ 'recovered_requests',count(*) FILTER(WHERE completed AND rate_limit_attempts>0),
+ 'exhausted_requests',count(*) FILTER(WHERE NOT completed AND rate_limit_attempts>0),
+ 'max_attempts_per_request',coalesce(max(rate_limit_attempts),0))
+FROM request_attempts GROUP BY "group",model;
+SELECT json_build_object('kind','account_load','tag',coalesce(c.tag,'untagged'),'model',model_name,
+ 'channel',channel_id,'successful_requests',count(*) FILTER(WHERE l.type=2),
+ 'error_attempts',count(*) FILTER(WHERE l.type=5),
+ 'rate_limit_attempts',count(*) FILTER(WHERE l.type=5 AND (l.content ILIKE '%tpm/rpm%' OR l.content ILIKE '%status_code=429%' OR l.content ILIKE '%status code: 429%')),
+ 'input_tokens',coalesce(sum(prompt_tokens) FILTER(WHERE l.type=2),0))
+FROM logs l LEFT JOIN channels c ON c.id=l.channel_id
+WHERE l.type IN(2,5) AND created_at BETWEEN {start} AND {end}
+GROUP BY c.tag,model_name,channel_id;
 SELECT json_build_object('kind','stream_end','reason',nullif(l.other,'')::jsonb#>>'{{stream_status,end_reason}}','count',count(*)) FROM logs l WHERE l.type=2 AND is_stream AND created_at BETWEEN {start} AND {end} GROUP BY 2;
 SELECT json_build_object('kind','protocol_routes','source',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}','target',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}','requests',count(*),'upstream_incomplete_streams',count(*) FILTER(WHERE nullif(l.other,'')::jsonb#>>'{{stream_status,status}}'='error' AND nullif(l.other,'')::jsonb#>>'{{stream_status,end_reason}}' IS DISTINCT FROM 'client_gone'),'downstream_cancellations',count(*) FILTER(WHERE nullif(l.other,'')::jsonb#>>'{{stream_status,end_reason}}'='client_gone'),'skipped_candidates',sum(CASE WHEN jsonb_typeof(nullif(l.other,'')::jsonb#>'{{admin_info,protocol_skips}}')='array' THEN jsonb_array_length(nullif(l.other,'')::jsonb#>'{{admin_info,protocol_skips}}') ELSE 0 END)) FROM logs l WHERE l.type=2 AND created_at BETWEEN {start} AND {end} AND nullif(l.other,'')::jsonb#>'{{admin_info,protocol_route}}' IS NOT NULL GROUP BY nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,source}}',nullif(l.other,'')::jsonb#>>'{{admin_info,protocol_route,target}}';
 WITH native_empty_stream_requests AS (
@@ -102,6 +125,7 @@ p=subprocess.run(['docker','exec','-i','new-api-postgres-1','psql','-X','-At','-
 if p.returncode: raise SystemExit(p.stderr)
 rows=[json.loads(line) for line in p.stdout.splitlines() if line.startswith('{')]
 http=collections.Counter()
+auth_http=collections.Counter()
 durations=[]
 access=pathlib.Path('/opt/new-api/caddy-logs/access.log')
 if access.exists():
@@ -111,6 +135,10 @@ if access.exists():
             except ValueError: continue
             if not start<=entry.get('ts',0)<=end: continue
             path=entry.get('request',{}).get('uri','').split('?',1)[0]
+            if path == '/api/user/auth/refresh':
+                auth_http['refresh:'+str(entry.get('status',0))]+=1
+            elif path in {'/api/user/login','/api/user/login/2fa','/api/user/login/verify','/api/user/login/passkey/begin','/api/user/login/passkey/finish','/api/user/passkey/login/begin','/api/user/passkey/login/finish'}:
+                auth_http['login:'+str(entry.get('status',0))]+=1
             if not path.startswith(('/v1/','/v1beta/')): continue
             if entry.get('request',{}).get('method')!='POST':continue
             http[str(entry.get('status',0))]+=1
@@ -128,7 +156,13 @@ for row in rows:
         alerts.append({'severity':'review','reason':'auto-review upstream incomplete streams','count':row['upstream_incomplete_streams']})
     if row['kind']=='native_empty_stream_retries' and row['error_only_requests']:
         alerts.append({'severity':'review','reason':'native empty-stream retries did not recover','count':row['error_only_requests']})
-result={'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'window_start':start,'window_end':end,'window_minutes':args.minutes,'http_status_counts':dict(http),'http_sample_count':len(durations),'http_p95_seconds':sorted(durations)[min(len(durations)-1,int(len(durations)*.95))] if durations else None,'aggregates':rows,'alerts':alerts,'interpretation':'Quota is internal ledger units, not supplier invoice. client_gone is a downstream cancellation and does not trigger an upstream stream alert. Error-only correlated requests are not a definitive final failure rate. Native empty-stream retries are safe retries before any client bytes. Access log sample covers current log file; stream metadata supplements HTTP status.'}
+    if row['kind']=='provider_rate_limits' and row['exhausted_requests']:
+        alerts.append({'severity':'review','reason':'provider rate limits exhausted all candidates','group':row['group'],'model':row['model'],'count':row['exhausted_requests']})
+for key,count in auth_http.items():
+    endpoint,status=key.split(':',1)
+    if status == '429': alerts.append({'severity':'review','reason':'authentication endpoint returned 429','endpoint':endpoint,'count':count})
+    if status.startswith('5'): alerts.append({'severity':'review','reason':'authentication endpoint returned 5xx','endpoint':endpoint,'status':status,'count':count})
+result={'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'window_start':start,'window_end':end,'window_minutes':args.minutes,'http_status_counts':dict(http),'auth_http_status_counts':dict(auth_http),'http_sample_count':len(durations),'http_p95_seconds':sorted(durations)[min(len(durations)-1,int(len(durations)*.95))] if durations else None,'aggregates':rows,'alerts':alerts,'interpretation':'Quota is internal ledger units, not supplier invoice. client_gone is a downstream cancellation and does not trigger an upstream stream alert. Error-only correlated requests are not a definitive final failure rate. Native empty-stream retries are safe retries before any client bytes. Access log sample covers current log file; stream metadata supplements HTTP status.'}
 encoded=json.dumps(result,ensure_ascii=False,indent=2)
 if args.output:
     output=pathlib.Path(args.output)
