@@ -21,5 +21,5 @@ Security controls: login stages share one 60 requests / 20 minutes / IP scope; r
 
 - Login: 60 requests per 1200 seconds per client IP.
 - Refresh: 120 requests per 1200 seconds per client IP.
-- SenseNova: use a 60-second rolling window with 20 requests and 1,000,000 estimated input tokens per account resource. An idle account always gets one attempt even when a single request exceeds the token window; subsequent requests move to lower-load SenseNova accounts.
+- SenseNova: use a 60-second rolling window with 20 requests and 300,000 estimated input tokens per account resource. An idle account always gets one attempt even when a single request exceeds the token window; subsequent requests move to lower-load SenseNova accounts.
 - Supplier order remains `sensenova → volcengine → kimi` for plus/dev, `kimi → volcengine → sensenova → ctyun` for vip, and SenseNova-only for default. CTYun stays disabled until the user’s remaining acceptance checks are complete.

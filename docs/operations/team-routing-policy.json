@@ -25,7 +25,7 @@
     "sensenova": {
       "window_seconds": 60,
       "max_requests": 20,
-      "max_input_tokens": 1000000
+      "max_input_tokens": 300000
     }
   },
   "max_attempts_per_tag": 0,
