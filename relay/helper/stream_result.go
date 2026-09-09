@@ -8,8 +8,9 @@ import (
 // to record soft errors, signal fatal stops, or mark normal completion.
 // StreamScannerHandler checks IsStopped() after each callback invocation.
 type StreamResult struct {
-	status  *relaycommon.StreamStatus
-	stopped bool
+	status    *relaycommon.StreamStatus
+	stopped   bool
+	completed bool
 }
 
 func newStreamResult(status *relaycommon.StreamStatus) *StreamResult {
@@ -32,6 +33,7 @@ func (r *StreamResult) Stop(err error) {
 	}
 	r.status.SetEndReason(relaycommon.StreamEndReasonHandlerStop, err)
 	r.stopped = true
+	r.completed = false
 }
 
 // Done signals that the handler has finished processing normally
@@ -39,6 +41,14 @@ func (r *StreamResult) Stop(err error) {
 func (r *StreamResult) Done() {
 	r.status.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 	r.stopped = true
+}
+
+// DoneAfterDelivery confirms the client received the protocol terminal event.
+// Unlike Done, it resolves a transport cancellation racing the successful flush.
+// Call only after checking every terminal write and finishing its accounting.
+func (r *StreamResult) DoneAfterDelivery() {
+	r.Done()
+	r.completed = true
 }
 
 // IsStopped returns whether Stop() or Done() was called during this chunk.
@@ -49,4 +59,5 @@ func (r *StreamResult) IsStopped() bool {
 // reset clears the per-chunk stopped flag so the object can be reused.
 func (r *StreamResult) reset() {
 	r.stopped = false
+	r.completed = false
 }

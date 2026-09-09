@@ -180,3 +180,11 @@ CI34208542342 and GHCR34208850270 subsequently completed successfully; all four 
 首轮新批量报告共20项：SenseNova十二独立账号Chat流式，账号01/02通过，其余10项上游429；Kimi Messages联网搜索通过；天翼kimi-k3基础文本通过。Kimi/火山若干工具测试被强制tool_choice与思考模式冲突拒绝，已按真实证据修正共享测试样例为auto；仍要求实际函数名称、参数、namespace及正常终止。Kimi Responses联网的可选search_context_size被上游400明确拒绝，移除该可选调参后200正常结束；此样例实际仅返回reasoning/message，没有搜索调用及引用，因此继续记未知，不能据此删除以前已验证的联网能力。工具/搜索样例修复没有改真实业务请求，也没有改能力配置、价格或健康状态。全Go测试及聚焦transport/控制器回归、独立复核通过。
 
 实际浏览器额外复现缓存A而服务器策略B的解除绑定操作，最终复制B（strict），确认不会还原旧缓存。实际完整网关通过共享模板，并验证改模板后不改渠道即可立即移除流式候选，再恢复模板。监测自动化保持每小时只读、变化才通知，不自动调用模型；当前最近一小时业务流量样本为0，不能声称成功率或成本已经改善。
+
+### 2026-09-09 Responses 终止收尾回归
+
+08:29–08:34 的 Windows Codex Desktop / kimi-k3 原生 Responses 请求集中记录 client_gone/context canceled，同期 SenseNova Chat 流正常。日志不足以证明每条历史请求的终止顺序；固定无用户正文的原生探测返回合法 response.completed，2.275秒完成、2.294秒EOF。
+
+既有测试文件新增回归：原生与 Chat 转换的 completed/done/incomplete 终止后上游保持连接，旧代码全部等待EOF并在取消后报错；成功终止flush与客户端取消竞争也可稳定复现。修复显式结束上游扫描，仅原生已检查的终止交付可覆盖随后传输取消；转换路径保留取消检查。额外验证终止前取消和终止Write失败不报告成功、输入/输出/缓存用量保留。旧CustomEvent忽略Write错误的终止用例先失败，改为检查写入后通过。
+
+完整 `go test ./...`、相关 `go vet`、前端生产构建通过。`go test -race -parallel 1 ./relay/channel/openai ./relay/helper` 通过；默认并行helper竞态检查发现 logger/logger.go:115 的既有全局计数器竞争，未修改的944ac1527基线也复现，不能宣称全项目无竞态。本次没有数据库、价格、权限或模板变更；生产版本与切换证据记录在服务器 `/opt/ops-backups/responses-stream-finish/`。

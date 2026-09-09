@@ -2,22 +2,161 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// A client can close immediately after successfully receiving a flushed event.
+// Waiting for body.Close makes that ordering deterministic without sleeps.
+type responsesDisconnectWriter struct {
+	*httptest.ResponseRecorder
+	cancel    context.CancelFunc
+	closed    <-chan struct{}
+	failWrite bool
+}
+
+func (w *responsesDisconnectWriter) Write(p []byte) (int, error) {
+	if w.failWrite {
+		return 0, io.ErrClosedPipe
+	}
+	return w.ResponseRecorder.Write(p)
+}
+
+func (w *responsesDisconnectWriter) Flush() {
+	w.ResponseRecorder.Flush()
+	w.cancel()
+	<-w.closed
+}
+
+type responsesDisconnectBody struct {
+	io.ReadCloser
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (b *responsesDisconnectBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(func() { close(b.closed) })
+	return err
+}
+
+func TestNativeResponsesClientCloseAfterDeliveredEvent(t *testing.T) {
+	service.InitTokenEncoders()
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+	for _, tc := range []struct {
+		name                string
+		terminal, failWrite bool
+	}{
+		{name: "terminal", terminal: true},
+		{name: "partial"},
+		{name: "terminal write failure", terminal: true, failWrite: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := `{"type":"response.output_text.delta","delta":"partial"}`
+			if tc.terminal {
+				event = `{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":100,"output_tokens":10}}}`
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			reader, writer := io.Pipe()
+			defer writer.Close()
+			body := &responsesDisconnectBody{ReadCloser: reader, closed: make(chan struct{})}
+			client := &responsesDisconnectWriter{ResponseRecorder: httptest.NewRecorder(), cancel: cancel, closed: body.closed}
+			client.failWrite = tc.failWrite
+			c, _ := gin.CreateTestContext(client)
+			c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/responses", nil)
+			c.Set("protocol_route", map[string]any{"source": "fixture"})
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-test"}, IsStream: true, DisablePing: true, RelayFormat: types.RelayFormatOpenAIResponses}
+			go func() { _, _ = io.WriteString(writer, "data: "+event+"\n\n") }()
+			usage, apiErr := OaiResponsesStreamHandler(c, info, &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body})
+			if !tc.failWrite {
+				assert.Contains(t, client.Body.String(), event)
+			}
+			if tc.terminal && !tc.failWrite {
+				require.Nil(t, apiErr)
+				assert.True(t, info.StreamStatus.IsSuccessful())
+				assert.Equal(t, 100, usage.PromptTokens)
+				assert.Equal(t, 10, usage.CompletionTokens)
+			} else {
+				assert.NotNil(t, apiErr)
+				assert.False(t, info.StreamStatus.IsSuccessful())
+			}
+		})
+	}
+}
+
+func TestResponsesTerminalFinishesBeforeUpstreamEOF(t *testing.T) {
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+	for _, format := range []types.RelayFormat{types.RelayFormatOpenAIResponses, types.RelayFormatOpenAI} {
+		for _, event := range []string{"response.completed", "response.done", "response.incomplete"} {
+			t.Run(string(format)+"/"+event, func(t *testing.T) {
+				terminal := `{"type":"` + event + `","response":{"status":"completed","usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":20}}}}`
+				if event == "response.incomplete" {
+					terminal = strings.Replace(terminal, `"status":"completed"`, `"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}`, 1)
+				}
+				c, recorder, resp, info := newResponsesChatTestContext(t, "", true)
+				ctx, cancel := context.WithCancel(c.Request.Context())
+				defer cancel()
+				c.Request = c.Request.WithContext(ctx)
+				c.Set("protocol_route", map[string]any{"source": "fixture"})
+				info.RelayFormat = format
+				reader, writer := io.Pipe()
+				defer writer.Close()
+				resp.Body = reader
+				go func() {
+					_, _ = io.WriteString(writer, "data: "+terminal+"\n\n")
+					// Keep the transport open after the protocol has finished.
+				}()
+				finished := make(chan struct{})
+				var usage *dto.Usage
+				var apiErr *types.NewAPIError
+				go func() {
+					defer close(finished)
+					if format == types.RelayFormatOpenAIResponses {
+						usage, apiErr = OaiResponsesStreamHandler(c, info, resp)
+					} else {
+						usage, apiErr = OaiResponsesToChatStreamHandler(c, info, resp)
+					}
+				}()
+				select {
+				case <-finished:
+				case <-time.After(time.Second):
+					cancel()
+					<-finished
+					t.Error("relay waited for transport EOF after a valid protocol terminal")
+				}
+				require.Nil(t, apiErr)
+				require.NotNil(t, usage)
+				assert.Equal(t, 100, usage.PromptTokens)
+				assert.Equal(t, 10, usage.CompletionTokens)
+				assert.Equal(t, 20, usage.PromptTokensDetails.CachedTokens)
+				assert.True(t, info.StreamStatus.IsSuccessful())
+				assert.NotEmpty(t, recorder.Body.String())
+			})
+		}
+	}
+}
 
 func TestOaiResponsesHandlerCountsOutputCallsNotDeclarations(t *testing.T) {
 	gin.SetMode(gin.TestMode)

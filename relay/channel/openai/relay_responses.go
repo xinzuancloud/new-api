@@ -197,6 +197,11 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				}
 			}
 		}
+		if protocolRouting && sawTerminal {
+			// The protocol is complete after its terminal event is delivered and
+			// accounted for; waiting for transport EOF can misclassify client close.
+			sr.DoneAfterDelivery()
+		}
 	})
 
 	if protocolRouting && streamErr == nil {

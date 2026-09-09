@@ -199,6 +199,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	}
 
 	dataChan := make(chan string, 10)
+	handlerCompleted := false
 
 	wg.Add(1)
 	gopool.Go(func() {
@@ -220,6 +221,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				dataHandler(data, sr)
 			}()
 			if sr.IsStopped() {
+				handlerCompleted = sr.completed
 				return
 			}
 		}
@@ -319,6 +321,13 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	}
 
 	cleanup()
+	// cleanup joins both workers. A terminal event successfully handled before
+	// client cancellation wins over the transport close racing its final flush.
+	// Handler/write errors still take precedence and are never cleared.
+	if handlerCompleted && !info.StreamStatus.HasErrors() {
+		info.StreamStatus.EndReason = relaycommon.StreamEndReasonDone
+		info.StreamStatus.EndError = nil
+	}
 	if info.StreamStatus.IsNormalEnd() && !info.StreamStatus.HasErrors() {
 		logger.LogInfo(c, fmt.Sprintf("stream ended: %s", info.StreamStatus.Summary()))
 	} else {

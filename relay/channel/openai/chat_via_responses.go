@@ -298,6 +298,14 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 				return
 			}
 		}
+		if sawTerminal {
+			if err := c.Request.Context().Err(); err != nil {
+				streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusBadGateway)
+				sr.Stop(streamErr)
+				return
+			}
+			sr.Done()
+		}
 	})
 
 	if streamErr == nil && !info.StreamStatus.IsSuccessful() {
