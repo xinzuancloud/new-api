@@ -131,6 +131,10 @@ func InitEnv() {
 	CriticalRateLimitEnable = GetEnvOrDefaultBool("CRITICAL_RATE_LIMIT_ENABLE", true)
 	CriticalRateLimitNum = GetEnvOrDefault("CRITICAL_RATE_LIMIT", 20)
 	CriticalRateLimitDuration = int64(GetEnvOrDefault("CRITICAL_RATE_LIMIT_DURATION", 20*60))
+	AuthLoginRateLimitNum = positiveEnv("AUTH_LOGIN_RATE_LIMIT", 60)
+	AuthLoginRateLimitDuration = int64(positiveEnv("AUTH_LOGIN_RATE_LIMIT_DURATION", 20*60))
+	AuthRefreshRateLimitNum = positiveEnv("AUTH_REFRESH_RATE_LIMIT", 120)
+	AuthRefreshRateLimitDuration = int64(positiveEnv("AUTH_REFRESH_RATE_LIMIT_DURATION", 20*60))
 
 	SearchRateLimitEnable = GetEnvOrDefaultBool("SEARCH_RATE_LIMIT_ENABLE", true)
 	SearchRateLimitNum = GetEnvOrDefault("SEARCH_RATE_LIMIT", 10)
@@ -139,11 +143,11 @@ func InitEnv() {
 }
 
 func initUserSessionSettings() {
-	UserSessionActiveLimit = positiveUserSessionEnv("USER_SESSION_ACTIVE_LIMIT", DefaultUserSessionActiveLimit)
-	UserSessionIssuanceLimit = positiveUserSessionEnv("USER_SESSION_ISSUANCE_LIMIT", DefaultUserSessionIssuanceLimit)
-	UserSessionIssuanceWindowSeconds = int64(positiveUserSessionEnv("USER_SESSION_ISSUANCE_WINDOW_SECONDS", DefaultUserSessionIssuanceWindowSeconds))
-	UserSessionRevokedRetentionDays = positiveUserSessionEnv("USER_SESSION_REVOKED_RETENTION_DAYS", DefaultUserSessionRevokedRetentionDays)
-	UserSessionHourlyAlertThreshold = positiveUserSessionEnv("USER_SESSION_HOURLY_ALERT_THRESHOLD", DefaultUserSessionHourlyAlertThreshold)
+	UserSessionActiveLimit = positiveEnv("USER_SESSION_ACTIVE_LIMIT", DefaultUserSessionActiveLimit)
+	UserSessionIssuanceLimit = positiveEnv("USER_SESSION_ISSUANCE_LIMIT", DefaultUserSessionIssuanceLimit)
+	UserSessionIssuanceWindowSeconds = int64(positiveEnv("USER_SESSION_ISSUANCE_WINDOW_SECONDS", DefaultUserSessionIssuanceWindowSeconds))
+	UserSessionRevokedRetentionDays = positiveEnv("USER_SESSION_REVOKED_RETENTION_DAYS", DefaultUserSessionRevokedRetentionDays)
+	UserSessionHourlyAlertThreshold = positiveEnv("USER_SESSION_HOURLY_ALERT_THRESHOLD", DefaultUserSessionHourlyAlertThreshold)
 
 	const secondsPerDay = 24 * 60 * 60
 	if int64(UserSessionRevokedRetentionDays) > math.MaxInt64/secondsPerDay {
@@ -166,7 +170,7 @@ func initUserSessionSettings() {
 	}
 }
 
-func positiveUserSessionEnv(name string, fallback int) int {
+func positiveEnv(name string, fallback int) int {
 	value := GetEnvOrDefault(name, fallback)
 	if value <= 0 {
 		SysError(fmt.Sprintf("%s must be positive, using default value: %d", name, fallback))

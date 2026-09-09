@@ -32,7 +32,7 @@ import {
 
 export type RefreshOutcome =
   | { kind: 'authenticated'; bundle: AuthBundle }
-  | { kind: 'anonymous' }
+  | { kind: 'anonymous'; verified: boolean }
   | { kind: 'transient_error'; error: unknown }
   | { kind: 'out_of_sync'; code?: string }
 
@@ -252,7 +252,7 @@ export function createRefreshRunner(
 
     if (response.status === 401) {
       runtime.clear(true)
-      return { kind: 'anonymous' }
+      return { kind: 'anonymous', verified: true }
     }
 
     if (!response.status || response.status >= 500 || response.status === 429) {
@@ -380,7 +380,7 @@ export async function resolveAuthentication(): Promise<RefreshOutcome> {
   const auth = useAuthStore.getState().auth
   const hasStaleSession = Boolean(auth.user && auth.session)
   if (auth.bootstrapState === 'complete' && !hasStaleSession) {
-    return { kind: 'anonymous' }
+    return { kind: 'anonymous', verified: true }
   }
 
   auth.setBootstrapState('checking')
@@ -401,10 +401,34 @@ export async function bootstrapAuthentication(): Promise<RefreshOutcome> {
   if (!currentValidAuthBundle() && !hasSessionHint()) {
     const auth = useAuthStore.getState().auth
     if (!auth.user && !auth.session) {
-      return { kind: 'anonymous' }
+      if (auth.bootstrapState === 'complete') {
+        return { kind: 'anonymous', verified: true }
+      }
+      return { kind: 'anonymous', verified: false }
     }
   }
   return resolveAuthentication()
+}
+
+// Nested route guards consume the root result so one navigation cannot issue
+// sequential refreshes. A missing session hint is explicitly unverified and
+// remains the only result that a protected or sign-in route resolves again.
+export async function resolveRouteAuthentication(
+  rootOutcome?: RefreshOutcome,
+  resolve: () => Promise<RefreshOutcome> = resolveAuthentication
+): Promise<RefreshOutcome> {
+  return !rootOutcome ||
+    (rootOutcome.kind === 'anonymous' && !rootOutcome.verified)
+    ? await resolve()
+    : rootOutcome
+}
+
+export function throwTransientAuthenticationError(
+  outcome: RefreshOutcome
+): void {
+  if (outcome.kind !== 'transient_error') return
+  if (outcome.error instanceof Error) throw outcome.error
+  throw new Error(t('Request failed'), { cause: outcome.error })
 }
 
 export function getCommonHeaders(): Record<string, string> {

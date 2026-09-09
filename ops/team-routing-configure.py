@@ -74,7 +74,7 @@ default_models=set()
 for row in channels:
     if row['status']==2: continue
     if 'default' in row['group'].split(','): default_models.update(row['models'].split(','))
-if default_models != {'deepseek-v4-flash','sensenova-6.8-flash-lite'}: raise RuntimeError('Unexpected default model whitelist')
+if default_models != {'deepseek-v4-flash','sensenova-6.8-flash-lite','codex-auto-review'}: raise RuntimeError('Unexpected default model whitelist')
 keywords=options.get('AutomaticDisableKeywords','').splitlines()
 quota_terms=[s.lower() for s in policy['quota_error_keywords']]
 keywords=[k for k in keywords if not any(term in k.lower() or k.lower() in term for term in quota_terms)]

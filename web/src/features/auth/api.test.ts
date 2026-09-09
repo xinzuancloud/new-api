@@ -121,7 +121,7 @@ describe('logout coordination', () => {
       request: async () => ({ success: false, message: 'not revoked' }),
       refresh: async () => {
         refreshCount += 1
-        return { kind: 'anonymous' }
+        return { kind: 'anonymous', verified: true }
       },
     })
 
@@ -155,7 +155,7 @@ describe('logout coordination', () => {
       request: async () => {
         throw mismatchError()
       },
-      refresh: async () => ({ kind: 'anonymous' }),
+      refresh: async () => ({ kind: 'anonymous', verified: true }),
     })
 
     expect(result).toEqual({ success: true, message: '' })

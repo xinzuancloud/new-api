@@ -66,6 +66,10 @@ export function RoutingPolicySection(props: { defaultValue: string }) {
   })
   useResetForm(form, loaded.values)
   const groups = useFieldArray({ control: form.control, name: 'groups' })
+  const capacities = useFieldArray({
+    control: form.control,
+    name: 'capacities',
+  })
   const errors = form.formState.errors
   const disabled = loaded.invalid || updateOption.isPending
 
@@ -113,6 +117,15 @@ export function RoutingPolicySection(props: { defaultValue: string }) {
       label: t('Rate-limit cooldown (seconds)'),
       min: 0,
       max: 3600,
+    },
+    {
+      name: 'rate_limit_max_cooldown_seconds',
+      label: t('Maximum rate-limit cooldown (seconds)'),
+      min: 0,
+      max: 86400,
+      description: t(
+        'Repeated 429 responses double the cooldown up to this value. A successful request resets the backoff.'
+      ),
     },
     {
       name: 'quota_cooldown_seconds',
@@ -233,6 +246,102 @@ export function RoutingPolicySection(props: { defaultValue: string }) {
                 disabled={disabled}
               >
                 {t('Add group rule')}
+              </Button>
+            </FieldSet>
+            <FieldSet>
+              <FieldLegend>{t('Account capacity by channel tag')}</FieldLegend>
+              <FieldDescription>
+                {t(
+                  'The gateway prefers the lowest-load account in a tag and skips accounts whose projected rolling load exceeds these limits. Zero disables one limit.'
+                )}
+              </FieldDescription>
+              {capacities.fields.length === 0 && (
+                <FieldDescription>{t('No capacity rules')}</FieldDescription>
+              )}
+              {capacities.fields.map((row, index) => (
+                <FieldGroup
+                  key={row.id}
+                  className='grid rounded-lg border p-4 md:grid-cols-2'
+                >
+                  <Field data-invalid={!!errors.capacities?.[index]?.tag}>
+                    <FieldLabel htmlFor={`routing-capacity-tag-${row.id}`}>
+                      {t('Channel tag')}
+                    </FieldLabel>
+                    <Input
+                      id={`routing-capacity-tag-${row.id}`}
+                      {...form.register(`capacities.${index}.tag`)}
+                      aria-invalid={!!errors.capacities?.[index]?.tag}
+                    />
+                    <FieldError errors={[errors.capacities?.[index]?.tag]} />
+                  </Field>
+                  {(
+                    [
+                      [
+                        'window_seconds',
+                        t('Rolling window (seconds)'),
+                        10,
+                        3600,
+                      ],
+                      ['max_requests', t('Maximum requests'), 0, 1_000_000],
+                      [
+                        'max_input_tokens',
+                        t('Maximum input tokens'),
+                        0,
+                        1_000_000_000_000,
+                      ],
+                    ] as const
+                  ).map(([name, label, min, max]) => (
+                    <Field
+                      key={name}
+                      data-invalid={!!errors.capacities?.[index]?.[name]}
+                    >
+                      <FieldLabel
+                        htmlFor={`routing-capacity-${name}-${row.id}`}
+                      >
+                        {label}
+                      </FieldLabel>
+                      <Input
+                        id={`routing-capacity-${name}-${row.id}`}
+                        type='number'
+                        min={min}
+                        max={max}
+                        step={1}
+                        {...form.register(`capacities.${index}.${name}`, {
+                          valueAsNumber: true,
+                        })}
+                        aria-invalid={!!errors.capacities?.[index]?.[name]}
+                      />
+                      <FieldError
+                        errors={[errors.capacities?.[index]?.[name]]}
+                      />
+                    </Field>
+                  ))}
+                  <Button
+                    type='button'
+                    variant='outline'
+                    className='self-start'
+                    onClick={() => capacities.remove(index)}
+                    disabled={disabled}
+                  >
+                    {t('Remove capacity rule')}
+                  </Button>
+                </FieldGroup>
+              ))}
+              <Button
+                type='button'
+                variant='outline'
+                className='self-start'
+                onClick={() =>
+                  capacities.append({
+                    tag: '',
+                    window_seconds: 60,
+                    max_requests: 0,
+                    max_input_tokens: 0,
+                  })
+                }
+                disabled={disabled}
+              >
+                {t('Add capacity rule')}
               </Button>
             </FieldSet>
             <FieldGroup className='grid gap-5 md:grid-cols-2'>

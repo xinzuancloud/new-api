@@ -199,6 +199,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 
 	relayInfo.SetEstimatePromptTokens(tokens)
+	common.SetContextKey(c, constant.ContextKeyEstimatedTokens, tokens)
 
 	priceData, err := helper.ModelPriceHelper(c, relayInfo, tokens, meta)
 	if err != nil {
@@ -273,6 +274,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
+		service.RecordRoutingAttempt(c, channel.Id, relayInfo.OriginModelName, relayInfo.GetEstimatePromptTokens())
 
 		if protocolPlan != nil {
 			newAPIError = relay.ExecuteProtocolRequest(c, relayInfo, protocolPlan)
@@ -293,6 +295,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = types.NewErrorWithStatusCode(context.DeadlineExceeded, types.ErrorCodeDoRequestFailed, http.StatusGatewayTimeout, types.ErrOptionWithSkipRetry())
 		}
 		if newAPIError == nil {
+			service.RecordRoutingSuccess(c, channel.Id, relayInfo.OriginModelName)
 			relayInfo.LastError = nil
 			return
 		}

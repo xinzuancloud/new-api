@@ -178,6 +178,25 @@ func CriticalRateLimit() func(c *gin.Context) {
 	return defNext
 }
 
+// AuthLoginRateLimit shares one IP window across every step that can complete
+// an anonymous login, so switching between password, MFA, and passkey routes
+// cannot reset the abuse-control counter.
+func AuthLoginRateLimit() func(c *gin.Context) {
+	if common.CriticalRateLimitEnable {
+		return rateLimitFactory(common.AuthLoginRateLimitNum, common.AuthLoginRateLimitDuration, "AL")
+	}
+	return defNext
+}
+
+// AuthRefreshRateLimit isolates routine browser session refreshes from login
+// and other critical operations. Origin and session checks remain separate.
+func AuthRefreshRateLimit() func(c *gin.Context) {
+	if common.CriticalRateLimitEnable {
+		return rateLimitFactory(common.AuthRefreshRateLimitNum, common.AuthRefreshRateLimitDuration, "AR")
+	}
+	return defNext
+}
+
 func UserCriticalRateLimit(scope string) func(c *gin.Context) {
 	if !common.CriticalRateLimitEnable {
 		return defNext

@@ -55,9 +55,11 @@ function renderPolicy(value = '') {
 const defaults = {
   enabled: false,
   group_tag_order: {},
+  tag_capacity: {},
   max_attempts_per_tag: 3,
   max_total_attempts: 0,
   rate_limit_cooldown_seconds: 60,
+  rate_limit_max_cooldown_seconds: 900,
   quota_cooldown_seconds: 3600,
   quota_error_keywords: [],
   request_timeout_seconds: 300,
@@ -89,6 +91,36 @@ describe('routing policy settings', () => {
     const values = routingPolicyFormDefaults('{"max_attempts_per_tag":3}')
     expect(values.max_attempts_per_tag).toBe(3)
     expect(values.max_total_attempts).toBe(0)
+  })
+
+  test('tag capacity rows round-trip with the dynamic cooldown ceiling', () => {
+    const values = createRoutingPolicyFormSchema((key) => key).parse(
+      routingPolicyFormDefaults(
+        JSON.stringify({
+          ...defaults,
+          tag_capacity: {
+            sensenova: {
+              window_seconds: 60,
+              max_requests: 12,
+              max_input_tokens: 1_000_000,
+            },
+          },
+          rate_limit_max_cooldown_seconds: 600,
+        })
+      )
+    )
+
+    expect(JSON.parse(serializeRoutingPolicy(values))).toEqual({
+      ...defaults,
+      tag_capacity: {
+        sensenova: {
+          window_seconds: 60,
+          max_requests: 12,
+          max_input_tokens: 1_000_000,
+        },
+      },
+      rate_limit_max_cooldown_seconds: 600,
+    })
   })
 
   test('all-channel mode and a separate request limit save together with stopping behavior explained', async () => {
@@ -132,6 +164,7 @@ describe('routing policy settings', () => {
     const values = schema.parse({
       ...defaults,
       groups: [{ group: ' team-a ', tags: ' primary \n fallback ' }],
+      capacities: [],
       quota_error_keywords: ' balance exhausted \n no quota ',
       rate_limit_cooldown_seconds: 0,
       quota_cooldown_seconds: 0,
@@ -155,11 +188,32 @@ describe('routing policy settings', () => {
     { request_timeout_seconds: 1801 },
     { rate_limit_cooldown_seconds: -1 },
     { rate_limit_cooldown_seconds: 3601 },
+    { rate_limit_max_cooldown_seconds: 59 },
     { quota_cooldown_seconds: 604801 },
     { max_attempts_per_tag: 1.5 },
     { groups: [{ group: '', tags: 'primary' }] },
     { groups: [{ group: 'a', tags: '' }] },
     { groups: [{ group: 'a', tags: 'primary\nprimary' }] },
+    {
+      capacities: [
+        {
+          tag: 'free',
+          window_seconds: 9,
+          max_requests: 1,
+          max_input_tokens: 0,
+        },
+      ],
+    },
+    {
+      capacities: [
+        {
+          tag: 'free',
+          window_seconds: 60,
+          max_requests: 0,
+          max_input_tokens: 0,
+        },
+      ],
+    },
     {
       groups: [
         { group: 'a', tags: 'primary' },
@@ -171,6 +225,7 @@ describe('routing policy settings', () => {
       createRoutingPolicyFormSchema((key) => key).safeParse({
         ...defaults,
         groups: [],
+        capacities: [],
         quota_error_keywords: '',
         ...override,
       }).success
@@ -206,6 +261,44 @@ describe('routing policy settings', () => {
         ...defaults,
         enabled: true,
         group_tag_order: { 'team-a': ['primary', 'fallback'] },
+      }),
+    })
+  })
+
+  test('adding a capacity rule saves rolling account limits', async () => {
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    renderPolicy()
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Add capacity rule' }))
+    await user.type(
+      screen.getByRole('textbox', { name: 'Channel tag' }),
+      'sensenova'
+    )
+    fireEvent.change(
+      screen.getByRole('spinbutton', { name: 'Maximum requests' }),
+      { target: { value: '20' } }
+    )
+    fireEvent.change(
+      screen.getByRole('spinbutton', { name: 'Maximum input tokens' }),
+      { target: { value: '1000000' } }
+    )
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    await waitFor(() => expect(put).toHaveBeenCalledOnce())
+    expect(put).toHaveBeenCalledWith('/api/option/', {
+      key: 'RoutingPolicy',
+      value: JSON.stringify({
+        ...defaults,
+        tag_capacity: {
+          sensenova: {
+            window_seconds: 60,
+            max_requests: 20,
+            max_input_tokens: 1_000_000,
+          },
+        },
       }),
     })
   })

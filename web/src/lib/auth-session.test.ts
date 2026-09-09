@@ -26,6 +26,8 @@ import {
   clearAuthenticatedClientState,
   createRefreshRunner,
   isAuthBundle,
+  resolveRouteAuthentication,
+  throwTransientAuthenticationError,
   type AuthRefreshRuntime,
 } from './auth-session'
 
@@ -57,13 +59,66 @@ afterEach(() => {
 describe('authentication session coordination', () => {
   test('bootstrap distinguishes a completed anonymous check from an active session', async () => {
     useAuthStore.getState().auth.reset('complete')
-    expect(await bootstrapAuthentication()).toEqual({ kind: 'anonymous' })
+    expect(await bootstrapAuthentication()).toEqual({
+      kind: 'anonymous',
+      verified: true,
+    })
 
     useAuthStore.getState().auth.setBundle(bundle)
     expect(await bootstrapAuthentication()).toEqual({
       kind: 'authenticated',
       bundle,
     })
+  })
+
+  test('route guards reuse a root result and retry only an unverified anonymous hint', async () => {
+    let resolutions = 0
+    const resolve = async () => {
+      resolutions += 1
+      return { kind: 'anonymous', verified: true } as const
+    }
+
+    expect(
+      await resolveRouteAuthentication(
+        { kind: 'authenticated', bundle },
+        resolve
+      )
+    ).toEqual({ kind: 'authenticated', bundle })
+    expect(
+      await resolveRouteAuthentication(
+        { kind: 'anonymous', verified: true },
+        resolve
+      )
+    ).toEqual({ kind: 'anonymous', verified: true })
+    expect(
+      await resolveRouteAuthentication(
+        { kind: 'anonymous', verified: false },
+        resolve
+      )
+    ).toEqual({ kind: 'anonymous', verified: true })
+    expect(resolutions).toBe(1)
+  })
+
+  test('route guards reuse a transient root refresh failure without another request', async () => {
+    let resolutions = 0
+    const failure = new Error('refresh unavailable')
+
+    await expect(
+      resolveRouteAuthentication(
+        { kind: 'transient_error', error: failure },
+        async () => {
+          resolutions += 1
+          return { kind: 'anonymous', verified: true }
+        }
+      )
+    ).resolves.toEqual({ kind: 'transient_error', error: failure })
+    expect(resolutions).toBe(0)
+    expect(() =>
+      throwTransientAuthenticationError({
+        kind: 'transient_error',
+        error: failure,
+      })
+    ).toThrow(failure)
   })
 
   test('a session mismatch clears only local state and retries without the stale SID', async () => {
@@ -117,6 +172,7 @@ describe('authentication session coordination', () => {
 
     expect(await createRefreshRunner(runtime)()).toEqual({
       kind: 'anonymous',
+      verified: true,
     })
     expect(clears).toEqual([[true, undefined]])
   })

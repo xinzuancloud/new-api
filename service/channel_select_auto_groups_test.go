@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -16,7 +17,9 @@ import (
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -105,6 +108,35 @@ func createChannelSelectAutoGroupsChannel(t *testing.T, db *gorm.DB, id int, gro
 		Enabled:   true,
 		Priority:  &priority,
 		Weight:    weight,
+	}).Error)
+}
+
+func useRoutingMiniRedis(t *testing.T) *miniredis.Miniredis {
+	t.Helper()
+	previousEnabled := common.RedisEnabled
+	previousClient := common.RDB
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	require.NoError(t, client.Ping(context.Background()).Err())
+	common.RedisEnabled = true
+	common.RDB = client
+	t.Cleanup(func() {
+		_ = client.Close()
+		common.RedisEnabled = previousEnabled
+		common.RDB = previousClient
+		routingCooldowns.Clear()
+		routingLoadBuckets.Clear()
+		routingRateLimitStrikes.Clear()
+	})
+	return server
+}
+
+func setRoutingTestAccount(t *testing.T, db *gorm.DB, id int, tag, account string) {
+	t.Helper()
+	setting := fmt.Sprintf(`{"protocol_routing":{"enabled":true,"account_resource":%q,"quota_scope":"model","defaults":{"entry_formats":["openai"],"endpoints":[{"format":"openai","path":"/v1/chat/completions","verified":true}]}}}`, account)
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", id).Updates(map[string]any{
+		"tag":     tag,
+		"setting": setting,
 	}).Error)
 }
 
@@ -259,6 +291,7 @@ func TestRoutingPolicyReservesFallbackAndExpiresCooldown(t *testing.T) {
 	ctx.Set("use_channel", []string{"3201", "3202", "3203"})
 	p.SetRetry(3)
 	routingCooldowns.Store(key, time.Now().Add(-time.Second))
+	routingCooldowns.Delete(routingCooldownKey{"channel:3204", ""})
 	next, _, err = CacheGetRandomSatisfiedChannel(p)
 	require.NoError(t, err)
 	require.NotNil(t, next)
@@ -273,6 +306,12 @@ func TestRoutingPolicyRejectsInvalidConfiguration(t *testing.T) {
 		func(p map[string]any) { p["quota_cooldown_seconds"] = -1 },
 		func(p map[string]any) { p["max_total_attempts"] = 1025 },
 		func(p map[string]any) { p["request_timeout_seconds"] = 1801 },
+		func(p map[string]any) {
+			p["tag_capacity"] = map[string]any{"free": map[string]any{"window_seconds": 9, "max_requests": 1}}
+		},
+		func(p map[string]any) {
+			p["tag_capacity"] = map[string]any{"free": map[string]any{"window_seconds": 60}}
+		},
 		func(p map[string]any) { p["group_tag_order"] = map[string][]string{"team": {"free", "free"}} },
 	} {
 		var policy map[string]any
@@ -283,6 +322,91 @@ func TestRoutingPolicyRejectsInvalidConfiguration(t *testing.T) {
 		require.Error(t, operation_setting.UpdateRoutingPolicy(string(raw)))
 		assert.Equal(t, original, operation_setting.RoutingPolicyJSON(), "invalid update must not change active policy")
 	}
+}
+
+func TestRoutingPolicyBalancesAccountLoadBeforePaidFallback(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	useRoutingMiniRedis(t)
+	original := operation_setting.RoutingPolicyJSON()
+	t.Cleanup(func() { require.NoError(t, operation_setting.UpdateRoutingPolicy(original)) })
+	require.NoError(t, operation_setting.UpdateRoutingPolicy(`{"enabled":true,"group_tag_order":{"team":["free","plan"]},"tag_capacity":{"free":{"window_seconds":60,"max_requests":10,"max_input_tokens":1000}},"max_attempts_per_tag":0,"max_total_attempts":32,"rate_limit_cooldown_seconds":60,"rate_limit_max_cooldown_seconds":600,"quota_cooldown_seconds":3600,"quota_error_keywords":[],"request_timeout_seconds":300}`))
+
+	for _, fixture := range []struct {
+		id      int
+		tag     string
+		account string
+	}{{6101, "free", "free-a"}, {6102, "free", "free-b"}, {6103, "free", "free-c"}, {6201, "plan", "plan-a"}} {
+		createChannelSelectAutoGroupsChannel(t, db, fixture.id, "team", "m")
+		setRoutingTestAccount(t, db, fixture.id, fixture.tag, fixture.account)
+	}
+	createChannelSelectAutoGroupsChannel(t, db, 6104, "team", "other-model")
+	setRoutingTestAccount(t, db, 6104, "free", "free-a")
+	model.InitChannelCache()
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	common.SetContextKey(ctx, constant.ContextKeyEstimatedTokens, 400)
+	param := &RetryParam{Ctx: ctx, TokenGroup: "team", ModelName: "m"}
+
+	RecordRoutingAttempt(ctx, 6101, "m", 500)
+	RecordRoutingAttempt(ctx, 6102, "m", 100)
+	RecordRoutingAttempt(ctx, 6103, "m", 900)
+	selected, _, err := CacheGetRandomSatisfiedChannel(param)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, 6102, selected.Id, "the lowest projected load in the highest tag wins")
+	RecordRoutingAttempt(ctx, 6104, "other-model", 200)
+	assert.False(t, RoutingAffinityAllowed(ctx, mustRoutingChannel(t, 6101), "m", "team"), "an affinity account that would exceed capacity must migrate")
+
+	RecordRoutingAttempt(ctx, 6102, "m", 600)
+	selected, _, err = CacheGetRandomSatisfiedChannel(param)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, 6201, selected.Id, "paid fallback begins only after every free account is locally saturated")
+}
+
+func mustRoutingChannel(t *testing.T, id int) *model.Channel {
+	t.Helper()
+	channel, err := model.CacheGetChannel(id)
+	require.NoError(t, err)
+	return channel
+}
+
+func TestRoutingPolicyPersistsCooldownAndBacksOffRepeated429(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	redisServer := useRoutingMiniRedis(t)
+	original := operation_setting.RoutingPolicyJSON()
+	t.Cleanup(func() { require.NoError(t, operation_setting.UpdateRoutingPolicy(original)) })
+	require.NoError(t, operation_setting.UpdateRoutingPolicy(`{"enabled":true,"group_tag_order":{"team":["free","plan"]},"max_attempts_per_tag":0,"max_total_attempts":32,"rate_limit_cooldown_seconds":60,"rate_limit_max_cooldown_seconds":600,"quota_cooldown_seconds":3600,"quota_error_keywords":[],"request_timeout_seconds":300}`))
+	for _, fixture := range []struct {
+		id      int
+		tag     string
+		account string
+	}{{6301, "free", "free-a"}, {6401, "plan", "plan-a"}} {
+		createChannelSelectAutoGroupsChannel(t, db, fixture.id, "team", "m")
+		setRoutingTestAccount(t, db, fixture.id, fixture.tag, fixture.account)
+	}
+	model.InitChannelCache()
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	param := &RetryParam{Ctx: ctx, TokenGroup: "team", ModelName: "m"}
+
+	RecordRoutingFailure(ctx, 6301, "m", 429, "inference exceeds tpm/rpm limit")
+	routingCooldowns.Clear() // simulate a new process; Redis remains authoritative
+	selected, _, err := CacheGetRandomSatisfiedChannel(param)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, 6401, selected.Id)
+
+	redisServer.FastForward(61 * time.Second)
+	RecordRoutingFailure(ctx, 6301, "m", 429, "inference exceeds tpm/rpm limit")
+	var cooldownTTL time.Duration
+	for _, key := range redisServer.Keys() {
+		if strings.Contains(key, ":cooldown:") {
+			cooldownTTL = redisServer.TTL(key)
+		}
+	}
+	assert.GreaterOrEqual(t, cooldownTTL, 119*time.Second)
+	assert.LessOrEqual(t, cooldownTTL, 120*time.Second)
 }
 
 func TestRoutingPolicyExhaustsProviderAccountsBeforeFallback(t *testing.T) {

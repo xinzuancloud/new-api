@@ -1,7 +1,9 @@
 package service
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,16 +34,27 @@ func RecordRoutingFailure(c *gin.Context, channelID int, modelName string, statu
 	if !policy.Enabled {
 		return
 	}
-	seconds := 0
-	if status == 429 {
-		seconds = policy.RateLimitCooldownSeconds
+	channel, err := model.CacheGetChannel(channelID)
+	if err != nil {
+		return
 	}
+	key, err := routingAccountKey(channel, modelName)
+	if err != nil {
+		return
+	}
+	seconds := 0
+	quotaFailure := false
 	lower := strings.ToLower(message)
 	for _, keyword := range policy.QuotaErrorKeywords {
 		if strings.Contains(lower, strings.ToLower(strings.TrimSpace(keyword))) {
 			seconds = policy.QuotaCooldownSeconds
+			quotaFailure = true
 			break
 		}
+	}
+	if status == 429 && !quotaFailure {
+		key.Model = ""
+		seconds = routingNextRateLimitCooldown(c, key, policy)
 	}
 	if seconds <= 0 {
 		return
@@ -56,36 +69,12 @@ func RecordRoutingFailure(c *gin.Context, channelID int, modelName string, statu
 		}
 		return true
 	})
-	channel, err := model.CacheGetChannel(channelID)
-	if err != nil {
-		return
-	}
-	key, err := routingAccountKey(channel, modelName)
-	if err != nil {
-		return
-	}
 	until := now.Add(time.Duration(seconds) * time.Second)
-	for {
-		previous, exists := routingCooldowns.Load(key)
-		if entries >= 10000 && !exists {
-			return
-		}
-		if exists {
-			if !previous.(time.Time).Before(until) {
-				return
-			}
-			if !routingCooldowns.CompareAndSwap(key, previous, until) {
-				continue
-			}
-		} else {
-			if _, loaded := routingCooldowns.LoadOrStore(key, until); loaded {
-				continue
-			}
-			logger.LogWarn(c, fmt.Sprintf("routing cooldown: channel=%d model=%s seconds=%d status=%d", channelID, modelName, seconds, status))
-		}
+	if _, exists := routingCooldowns.Load(key); entries >= 10000 && !exists {
 		return
 	}
-
+	routingStoreCooldown(c, key, until)
+	logger.LogWarn(c, fmt.Sprintf("routing cooldown: channel=%d model=%s seconds=%d status=%d", channelID, modelName, seconds, status))
 }
 
 // SelectPolicyChannel returns handled=false for groups without a policy, keeping
@@ -126,6 +115,10 @@ func SelectPolicyChannel(param *RetryParam, group string) (*model.Channel, bool,
 	})
 	filters := append([]dto.ChannelFilter{}, GetChannelConstraints(param.Ctx).Filters...)
 	filters = append(filters, dto.ChannelFilter{Kind: dto.FilterExcludedChannels, ExcludedChannelIDs: excluded})
+	type candidateWithLoad struct {
+		channel *model.Channel
+		load    routingLoad
+	}
 	candidates := []*model.Channel{}
 	lastTier := 0
 	for rank, tag := range order {
@@ -141,6 +134,11 @@ func SelectPolicyChannel(param *RetryParam, group string) (*model.Channel, bool,
 			continue
 		}
 		tagFilters := append(append([]dto.ChannelFilter{}, filters...), dto.ChannelFilter{Kind: dto.FilterChannelTag, ChannelTag: tag})
+		eligible := []candidateWithLoad{}
+		var eligiblePriority int64
+		capacity, tracksCapacity := policy.TagCapacity[tag]
+		estimatedTokens := int64(common.GetContextKeyInt(param.Ctx, constant.ContextKeyEstimatedTokens))
+		now := time.Now()
 		for {
 			channel, err := model.GetRandomSatisfiedChannel(group, param.ModelName, 0, tagFilters)
 			if err != nil {
@@ -152,13 +150,39 @@ func SelectPolicyChannel(param *RetryParam, group string) (*model.Channel, bool,
 			if ok, _ := model.ChannelSatisfiesFilters(channel, param.ModelName, tagFilters); !ok {
 				return nil, true, fmt.Errorf("routing candidate did not satisfy policy constraints")
 			}
+			priority := channel.GetPriority()
+			if len(eligible) > 0 && priority < eligiblePriority {
+				break
+			}
 			key, mappingErr := routingAccountKey(channel, param.ModelName)
-			if mappingErr != nil || usedResources[key.Resource] || routingAccountCooling(channel, param.ModelName, now) {
+			if mappingErr != nil || usedResources[key.Resource] || routingAccountCooling(param.Ctx, channel, param.ModelName, now) {
 				tagFilters = append(tagFilters, dto.ChannelFilter{Kind: dto.FilterExcludedChannels, ExcludedChannelIDs: []int{channel.Id}})
 				continue
 			}
-			candidates = append(candidates, channel)
-			break
+			load := routingLoad{}
+			if tracksCapacity {
+				loadKey := key
+				loadKey.Model = ""
+				load = routingReadLoad(param.Ctx, loadKey, capacity, now)
+				if routingLoadSaturated(load, capacity, estimatedTokens) {
+					tagFilters = append(tagFilters, dto.ChannelFilter{Kind: dto.FilterExcludedChannels, ExcludedChannelIDs: []int{channel.Id}})
+					continue
+				}
+			}
+			if len(eligible) == 0 {
+				eligiblePriority = priority
+			}
+			eligible = append(eligible, candidateWithLoad{channel: channel, load: load})
+			tagFilters = append(tagFilters, dto.ChannelFilter{Kind: dto.FilterExcludedChannels, ExcludedChannelIDs: []int{channel.Id}})
+		}
+		if len(eligible) > 0 {
+			slices.SortStableFunc(eligible, func(a, b candidateWithLoad) int {
+				return cmp.Compare(
+					routingLoadUtilization(a.load, capacity),
+					routingLoadUtilization(b.load, capacity),
+				)
+			})
+			candidates = append(candidates, eligible[0].channel)
 		}
 	}
 	if len(candidates) == 0 {
@@ -188,8 +212,18 @@ func RoutingAffinityAllowed(c *gin.Context, preferred *model.Channel, modelName,
 		return false
 	}
 	key, mappingErr := routingAccountKey(preferred, modelName)
-	if mappingErr != nil || routingAccountCooling(preferred, modelName, time.Now()) {
+	if mappingErr != nil || routingAccountCooling(c, preferred, modelName, time.Now()) {
 		return false
+	}
+	policy := operation_setting.GetRoutingPolicy()
+	if capacity, ok := policy.TagCapacity[*preferred.Tag]; ok {
+		loadKey := key
+		loadKey.Model = ""
+		load := routingReadLoad(c, loadKey, capacity, time.Now())
+		estimatedTokens := int64(common.GetContextKeyInt(c, constant.ContextKeyEstimatedTokens))
+		if routingLoadSaturated(load, capacity, estimatedTokens) {
+			return false
+		}
 	}
 	for _, idText := range c.GetStringSlice("use_channel") {
 		id, err := strconv.Atoi(idText)
@@ -207,7 +241,7 @@ func RoutingAffinityAllowed(c *gin.Context, preferred *model.Channel, modelName,
 	return true
 }
 
-func routingAccountCooling(channel *model.Channel, name string, now time.Time) bool {
+func routingAccountCooling(c *gin.Context, channel *model.Channel, name string, now time.Time) bool {
 	key, err := routingAccountKey(channel, name)
 	if err != nil {
 		return true
@@ -221,8 +255,15 @@ func routingAccountCooling(channel *model.Channel, name string, now time.Time) b
 	if until, ok := routingCooldowns.Load(key); ok && until.(time.Time).After(now) {
 		return true
 	}
+	if routingRedisCooldown(c, key, now) {
+		return true
+	}
 	// Honor an account-wide failure even when an alias declares model scope.
-	if until, ok := routingCooldowns.Load(routingCooldownKey{Resource: key.Resource}); ok && until.(time.Time).After(now) {
+	accountKey := routingCooldownKey{Resource: key.Resource}
+	if until, ok := routingCooldowns.Load(accountKey); ok && until.(time.Time).After(now) {
+		return true
+	}
+	if routingRedisCooldown(c, accountKey, now) {
 		return true
 	}
 	return false

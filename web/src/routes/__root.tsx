@@ -39,6 +39,7 @@ import {
   bootstrapAuthentication,
   clearAuthenticatedClientState,
   clearAuthentication,
+  type RefreshOutcome,
 } from '@/lib/auth-session'
 import { subscribeAuthSessionEvents } from '@/lib/auth-session-sync'
 import { resolveLegacyRoute } from '@/lib/legacy-route'
@@ -112,6 +113,7 @@ let setupStatusChecked = false
 
 export const Route = createRootRouteWithContext<{
   queryClient: QueryClient
+  authBootstrapOutcome?: RefreshOutcome
 }>()({
   // 应用初始化与路由解析前统一校验会话
   beforeLoad: async ({ location }) => {
@@ -127,7 +129,7 @@ export const Route = createRootRouteWithContext<{
 
     // 只检查 setup 状态（如果需要）
     if (needsSetupCheck) {
-      const [status] = await Promise.all([
+      const [status, authBootstrapOutcome] = await Promise.all([
         getSetupStatus().catch((error) => {
           if (import.meta.env.DEV) {
             // eslint-disable-next-line no-console
@@ -144,8 +146,9 @@ export const Route = createRootRouteWithContext<{
         }
         setupStatusChecked = true
       }
+      return { authBootstrapOutcome }
     } else {
-      await authBootstrap
+      return { authBootstrapOutcome: await authBootstrap }
     }
   },
   component: RootComponent,
