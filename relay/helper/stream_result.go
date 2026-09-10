@@ -10,6 +10,7 @@ import (
 type StreamResult struct {
 	status    *relaycommon.StreamStatus
 	stopped   bool
+	done      bool
 	completed bool
 }
 
@@ -33,6 +34,7 @@ func (r *StreamResult) Stop(err error) {
 	}
 	r.status.SetEndReason(relaycommon.StreamEndReasonHandlerStop, err)
 	r.stopped = true
+	r.done = false
 	r.completed = false
 }
 
@@ -41,6 +43,7 @@ func (r *StreamResult) Stop(err error) {
 func (r *StreamResult) Done() {
 	r.status.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 	r.stopped = true
+	r.done = true
 }
 
 // DoneAfterDelivery confirms the client received the protocol terminal event.
@@ -56,8 +59,9 @@ func (r *StreamResult) IsStopped() bool {
 	return r.stopped
 }
 
-// reset clears the per-chunk stopped flag so the object can be reused.
+// reset clears the per-chunk flags so the object can be reused.
 func (r *StreamResult) reset() {
 	r.stopped = false
+	r.done = false
 	r.completed = false
 }

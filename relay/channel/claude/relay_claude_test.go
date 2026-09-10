@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -567,6 +568,59 @@ func TestClaudeTerminalFinishesBeforeUpstreamEOF(t *testing.T) {
 			assert.Equal(t, 100, usage.PromptTokens)
 			assert.Equal(t, 10, usage.CompletionTokens)
 			assert.Equal(t, 20, usage.PromptTokensDetails.CachedTokens)
+			assert.True(t, info.StreamStatus.IsSuccessful())
+		})
+	}
+}
+
+// resetAfterBody delivers the payload, then fails the read that would have
+// returned EOF with a non-EOF error, simulating an abortive upstream close
+// (TCP RST) arriving right after the terminal event.
+type resetAfterBody struct {
+	reader io.Reader
+}
+
+func (b *resetAfterBody) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	if err == io.EOF {
+		err = errors.New("simulated upstream reset")
+	}
+	return n, err
+}
+
+func (b *resetAfterBody) Close() error { return nil }
+
+// A terminal event that was fully processed must win over a trailing upstream
+// transport error, on both native (DoneAfterDelivery) and converted (plain
+// Done) paths.
+func TestClaudeStreamTerminalUpstreamResetAfterTerminal(t *testing.T) {
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+	for _, format := range []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAI, types.RelayFormatGemini, types.RelayFormatOpenAIResponses} {
+		t.Run(string(format), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/messages", nil)
+			c.Set("protocol_route", map[string]any{"source": "fixture"})
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "claude-test"}, RelayFormat: format, IsStream: true, DisablePing: true}
+			body := &resetAfterBody{reader: strings.NewReader(
+				`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test","role":"assistant","usage":{"input_tokens":100,"cache_read_input_tokens":20}}}` + "\n\n" +
+					`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}` + "\n\n" +
+					`data: {"type":"message_stop"}` + "\n\n")}
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body}
+			var usage *dto.Usage
+			var apiErr *types.NewAPIError
+			if format == types.RelayFormatOpenAIResponses {
+				usage, apiErr = ClaudeResponsesStreamHandler(c, resp, info)
+			} else {
+				usage, apiErr = ClaudeStreamHandler(c, resp, info)
+			}
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Equal(t, 100, usage.PromptTokens)
+			assert.Equal(t, 10, usage.CompletionTokens)
 			assert.True(t, info.StreamStatus.IsSuccessful())
 		})
 	}
