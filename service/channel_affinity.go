@@ -33,14 +33,30 @@ const (
 )
 
 var (
-	channelAffinityCacheOnce sync.Once
-	channelAffinityCache     *cachex.HybridCache[int]
+	// 缓存句柄按容量/默认TTL参数化重建：配置变更无需重启即可生效。
+	// 重建会丢弃内存模式下的存量条目（Redis 模式条目在 Redis 侧，不受影响）。
+	channelAffinityCacheMu     sync.Mutex
+	channelAffinityCache       *cachex.HybridCache[int]
+	channelAffinityCacheParams [2]int
 
 	channelAffinityUsageCacheStatsOnce  sync.Once
 	channelAffinityUsageCacheStatsCache *cachex.HybridCache[ChannelAffinityUsageCacheCounters]
 
 	channelAffinityRegexCache sync.Map // map[string]*regexp.Regexp
+
+	// channelAffinityLastWrite 给滑动续期写去重：同 key 同渠道在窗口内不重复 SETEX。
+	// 条目基数与活跃亲和 key 相同，随会话规模线性有界。
+	channelAffinityLastWrite sync.Map
 )
+
+type channelAffinityWriteEntry struct {
+	ChannelID int
+	At        time.Time
+}
+
+// channelAffinityRewriteInterval 同一亲和 key 对同一渠道的续期写最小间隔。
+// 渠道发生切换（switch_on_success 改钉）时必须立即写，不受此窗口限制。
+const channelAffinityRewriteInterval = 30 * time.Second
 
 type channelAffinityMeta struct {
 	CacheKey       string
@@ -81,32 +97,37 @@ type ChannelAffinityCacheStats struct {
 }
 
 func getChannelAffinityCache() *cachex.HybridCache[int] {
-	channelAffinityCacheOnce.Do(func() {
-		setting := operation_setting.GetChannelAffinitySetting()
-		capacity := setting.MaxEntries
-		if capacity <= 0 {
-			capacity = 100_000
-		}
-		defaultTTLSeconds := setting.DefaultTTLSeconds
-		if defaultTTLSeconds <= 0 {
-			defaultTTLSeconds = 3600
-		}
-
-		channelAffinityCache = cachex.NewHybridCache[int](cachex.HybridCacheConfig[int]{
-			Namespace: cachex.Namespace(channelAffinityCacheNamespace),
-			Redis:     common.RDB,
-			RedisEnabled: func() bool {
-				return common.RedisEnabled && common.RDB != nil
-			},
-			RedisCodec: cachex.IntCodec{},
-			Memory: func() *hot.HotCache[string, int] {
-				return hot.NewHotCache[string, int](hot.LRU, capacity).
-					WithTTL(time.Duration(defaultTTLSeconds) * time.Second).
-					WithJanitor().
-					Build()
-			},
-		})
+	setting := operation_setting.GetChannelAffinitySetting()
+	capacity := setting.MaxEntries
+	if capacity <= 0 {
+		capacity = 100_000
+	}
+	defaultTTLSeconds := setting.DefaultTTLSeconds
+	if defaultTTLSeconds <= 0 {
+		defaultTTLSeconds = 3600
+	}
+	// 容量/默认 TTL 仅在建缓存时生效；参数变化时重建（内存模式丢存量条目，Redis 模式无感）。
+	params := [2]int{capacity, defaultTTLSeconds}
+	channelAffinityCacheMu.Lock()
+	defer channelAffinityCacheMu.Unlock()
+	if channelAffinityCache != nil && channelAffinityCacheParams == params {
+		return channelAffinityCache
+	}
+	channelAffinityCache = cachex.NewHybridCache[int](cachex.HybridCacheConfig[int]{
+		Namespace: cachex.Namespace(channelAffinityCacheNamespace),
+		Redis:     common.RDB,
+		RedisEnabled: func() bool {
+			return common.RedisEnabled && common.RDB != nil
+		},
+		RedisCodec: cachex.IntCodec{},
+		Memory: func() *hot.HotCache[string, int] {
+			return hot.NewHotCache[string, int](hot.LRU, capacity).
+				WithTTL(time.Duration(defaultTTLSeconds) * time.Second).
+				WithJanitor().
+				Build()
+		},
 	})
+	channelAffinityCacheParams = params
 	return channelAffinityCache
 }
 
@@ -627,18 +648,40 @@ func ShouldSkipRetryAfterChannelAffinityFailure(c *gin.Context) bool {
 	if c == nil {
 		return false
 	}
+	// 只认显式标记：MarkChannelAffinityUsed 仅在本次尝试确实使用了亲和渠道时置位。
+	// 不得回退读规则 meta——规则匹配出 key 不代表亲和渠道参与了选渠
+	//（缓存未命中、被过滤/冷却拒绝、Redis 读失败都会留下 meta 但没用上亲和）。
 	v, ok := c.Get(ginKeyChannelAffinitySkipRetry)
-	if ok {
-		b, ok := v.(bool)
-		if ok {
-			return b
-		}
-	}
-	meta, ok := getChannelAffinityMeta(c)
 	if !ok {
 		return false
 	}
-	return meta.SkipRetry
+	b, ok := v.(bool)
+	if !ok {
+		return false
+	}
+	return b
+}
+
+// ClearChannelAffinityOnPinnedFailure 在本次失败的尝试确实由亲和钉住的渠道
+// 提供服务时清除亲和条目，避免同会话的下一个请求重新钉到故障渠道。
+// 非亲和渠道的重试失败不清除（条目有效性由读路径的状态/冷却校验兜底）。
+func ClearChannelAffinityOnPinnedFailure(c *gin.Context, channelID int) {
+	if c == nil || channelID <= 0 {
+		return
+	}
+	v, ok := c.Get(ginKeyChannelAffinityLogInfo)
+	if !ok {
+		return
+	}
+	info, ok := v.(map[string]any)
+	if !ok {
+		return
+	}
+	pinned, ok := info["channel_id"].(int)
+	if !ok || pinned != channelID {
+		return
+	}
+	ClearCurrentChannelAffinityCache(c)
 }
 
 func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
@@ -734,9 +777,18 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 		ttlSeconds = 3600
 	}
 	cache := getChannelAffinityCache()
+	// 滑动续期写去重：窗口内同 key 同渠道的重复成功请求不再重复 SETEX
+	if last, ok := channelAffinityLastWrite.Load(cacheKey); ok {
+		entry := last.(channelAffinityWriteEntry)
+		if entry.ChannelID == channelID && time.Since(entry.At) < channelAffinityRewriteInterval {
+			return
+		}
+	}
 	if err := cache.SetWithTTL(cacheKey, channelID, time.Duration(ttlSeconds)*time.Second); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity cache set failed: key=%s, err=%v", cacheKey, err))
+		return
 	}
+	channelAffinityLastWrite.Store(cacheKey, channelAffinityWriteEntry{ChannelID: channelID, At: time.Now()})
 }
 
 type ChannelAffinityUsageCacheStats struct {

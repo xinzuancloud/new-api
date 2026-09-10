@@ -28,12 +28,14 @@ type ChannelAffinityRule struct {
 }
 
 type ChannelAffinitySetting struct {
-	Enabled               bool                  `json:"enabled"`
-	SwitchOnSuccess       bool                  `json:"switch_on_success"`
-	KeepOnChannelDisabled bool                  `json:"keep_on_channel_disabled"`
-	MaxEntries            int                   `json:"max_entries"`
-	DefaultTTLSeconds     int                   `json:"default_ttl_seconds"`
-	Rules                 []ChannelAffinityRule `json:"rules"`
+	Enabled               bool `json:"enabled"`
+	SwitchOnSuccess       bool `json:"switch_on_success"`
+	KeepOnChannelDisabled bool `json:"keep_on_channel_disabled"`
+	// MaxEntries 仅约束内存模式（无 Redis）的 LRU 容量；Redis 模式下条目数
+	// 只受 TTL×新增会话速率约束，本项不生效。
+	MaxEntries        int                   `json:"max_entries"`
+	DefaultTTLSeconds int                   `json:"default_ttl_seconds"`
+	Rules             []ChannelAffinityRule `json:"rules"`
 }
 
 // Keep Codex CLI passthrough aligned with upstream. Codex uses lower-case

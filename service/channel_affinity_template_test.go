@@ -144,7 +144,7 @@ func TestShouldSkipRetryAfterChannelAffinityFailure(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "fallback to matched rule meta",
+			name: "matched rule meta alone does not skip retry",
 			ctx: func() *gin.Context {
 				return buildChannelAffinityTemplateContextForTest(channelAffinityMeta{
 					RuleName:   "rule-skip-retry",
@@ -153,7 +153,8 @@ func TestShouldSkipRetryAfterChannelAffinityFailure(t *testing.T) {
 					ModelName:  "gpt-5",
 				})
 			},
-			want: true,
+			// 规则 meta 不代表亲和渠道参与了选渠（缓存未命中/被过滤/读失败），不得跳过重试
+			want: false,
 		},
 		{
 			name: "no flag and no skip retry meta",
@@ -253,6 +254,10 @@ func TestClearCurrentChannelAffinityCache(t *testing.T) {
 		RuleName:   "codex cli trace",
 		SkipRetry:  true,
 	})
+	// 仅匹配出规则 meta 不再跳过重试：skip-retry 只认实际使用了亲和渠道的显式置位，
+	// 避免"亲和渠道未参与选渠（缓存未命中/被过滤/Redis 读失败）却跳过重试"。
+	require.False(t, ShouldSkipRetryAfterChannelAffinityFailure(ctx))
+	ctx.Set(ginKeyChannelAffinitySkipRetry, true)
 	require.True(t, ShouldSkipRetryAfterChannelAffinityFailure(ctx))
 
 	deleted := ClearCurrentChannelAffinityCache(ctx)
@@ -261,6 +266,37 @@ func TestClearCurrentChannelAffinityCache(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, found)
 	require.False(t, ShouldSkipRetryAfterChannelAffinityFailure(ctx))
+}
+
+func TestClearChannelAffinityOnPinnedFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cacheKeySuffix := fmt.Sprintf("codex cli trace:default:pinned-failure-%d", time.Now().UnixNano())
+	cacheKeyFull := channelAffinityCacheNamespace + ":" + cacheKeySuffix
+	cache := getChannelAffinityCache()
+	require.NoError(t, cache.SetWithTTL(cacheKeySuffix, 9527, time.Minute))
+	t.Cleanup(func() {
+		_, _ = cache.DeleteMany([]string{cacheKeySuffix})
+	})
+
+	ctx := buildChannelAffinityTemplateContextForTest(channelAffinityMeta{
+		CacheKey:   cacheKeyFull,
+		TTLSeconds: 60,
+		RuleName:   "codex cli trace",
+	})
+	ctx.Set(ginKeyChannelAffinityLogInfo, map[string]any{"channel_id": 9527})
+
+	// 非钉住渠道（重试落在别的渠道）的失败不清条目
+	ClearChannelAffinityOnPinnedFailure(ctx, 1234)
+	_, found, err := cache.Get(cacheKeySuffix)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	// 钉住渠道本身的失败清除条目，下个请求不再重钉故障渠道
+	ClearChannelAffinityOnPinnedFailure(ctx, 9527)
+	_, found, err = cache.Get(cacheKeySuffix)
+	require.NoError(t, err)
+	require.False(t, found)
 }
 
 func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
@@ -331,4 +367,52 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 	require.False(t, exists)
 	_, exists = info.RuntimeHeadersOverride["x-codex-turn-metadata"]
 	require.False(t, exists)
+}
+
+func TestRecordChannelAffinityWriteDedup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cacheKeySuffix := fmt.Sprintf("codex cli trace:default:dedup-%d", time.Now().UnixNano())
+	cacheKeyFull := channelAffinityCacheNamespace + ":" + cacheKeySuffix
+	cache := getChannelAffinityCache()
+	t.Cleanup(func() {
+		_, _ = cache.DeleteMany([]string{cacheKeySuffix, cacheKeyFull})
+		channelAffinityLastWrite.Delete(cacheKeyFull)
+	})
+	ctx := buildChannelAffinityTemplateContextForTest(channelAffinityMeta{
+		CacheKey:   cacheKeyFull,
+		TTLSeconds: 60,
+		RuleName:   "codex cli trace",
+	})
+
+	RecordChannelAffinity(ctx, 9527)
+	_, found, err := cache.Get(cacheKeyFull)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	// 窗口内同渠道续期写被去重：删掉缓存条目后再写，若仍 miss 证明未真正写入
+	_, _ = cache.DeleteMany([]string{cacheKeyFull})
+	RecordChannelAffinity(ctx, 9527)
+	_, found, err = cache.Get(cacheKeyFull)
+	require.NoError(t, err)
+	require.False(t, found, "窗口内同渠道续期写应被去重")
+
+	// 渠道切换（switch_on_success 改钉）必须立即重写
+	RecordChannelAffinity(ctx, 9528)
+	got, found, err := cache.Get(cacheKeyFull)
+	require.NoError(t, err)
+	require.True(t, found, "渠道切换必须立即重写")
+	require.Equal(t, 9528, got)
+}
+
+func TestChannelAffinityCacheRebuildsOnParamChange(t *testing.T) {
+	setting := operation_setting.GetChannelAffinitySetting()
+	original := setting.MaxEntries
+	t.Cleanup(func() {
+		setting.MaxEntries = original
+		getChannelAffinityCache()
+	})
+	first := getChannelAffinityCache()
+	setting.MaxEntries = original + 1
+	require.NotSame(t, first, getChannelAffinityCache(), "容量参数变化应重建缓存句柄")
 }
