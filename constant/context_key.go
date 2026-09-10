@@ -70,6 +70,9 @@ const (
 	ContextKeyIsStream                         ContextKey = "is_stream"
 	ContextKeyStreamStatus                     ContextKey = "stream_status"
 	ContextKeyProtocolNativeEmptyStreamRetries ContextKey = "protocol_native_empty_stream_retries"
+	// ContextKeyRoutingBudgetDeadline 路由重试预算的墙钟截止时间（time.Time）。
+	// 只约束"是否再发起新尝试"的决策点，不作为 ctx deadline 取消在飞流式传输。
+	ContextKeyRoutingBudgetDeadline ContextKey = "routing_budget_deadline"
 
 	// ContextKeyAuditLogged marks that the current request has already recorded
 	// a manage/operation audit log inside the handler. When set, the admin-audit

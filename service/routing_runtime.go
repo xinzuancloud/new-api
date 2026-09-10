@@ -39,6 +39,54 @@ type routingStrike struct {
 var routingLoadBuckets sync.Map
 var routingRateLimitStrikes sync.Map
 
+// routingAuthStrikes 记录账号级 401/403 连败（30 分钟窗口），
+// 供整渠道 auto-ban 门控：鉴权错误先走账号级短冷却，连败达标才允许禁用。
+var routingAuthStrikes sync.Map
+
+type routingAuthStrike struct {
+	Count     int
+	ExpiresAt time.Time
+}
+
+// AllowAutoBanChannel 门控 401/403 触发的整渠道自动禁用：同一账号 30 分钟内
+// 累计 3 次鉴权失败才放行 auto-ban，其余状态码维持原语义立即放行。
+// 一次成功请求（RecordRoutingSuccess）清零连败。
+func AllowAutoBanChannel(c *gin.Context, channelID int, status int) bool {
+	if status != 401 && status != 403 {
+		return true
+	}
+	channel, err := model.CacheGetChannel(channelID)
+	if err != nil {
+		return true
+	}
+	key, _ := routingAccountKey(channel, "")
+	key.Model = ""
+	now := time.Now()
+	for {
+		previousValue, exists := routingAuthStrikes.Load(key)
+		previous := routingAuthStrike{}
+		if exists {
+			previous = previousValue.(routingAuthStrike)
+		}
+		if previous.ExpiresAt.Before(now) {
+			previous.Count = 0
+		}
+		next := routingAuthStrike{Count: previous.Count + 1, ExpiresAt: now.Add(30 * time.Minute)}
+		if exists {
+			if !routingAuthStrikes.CompareAndSwap(key, previousValue, next) {
+				continue
+			}
+		} else if _, loaded := routingAuthStrikes.LoadOrStore(key, next); loaded {
+			continue
+		}
+		if next.Count < 3 {
+			logger.LogWarn(routingRequestContext(c), fmt.Sprintf("auth failure %d/3 within 30m for channel=%d status=%d: auto-ban deferred to routing cooldown", next.Count, channelID, status))
+			return false
+		}
+		return true
+	}
+}
+
 const routingLoadRecordScript = `
 local second = ARGV[1]
 local window = tonumber(ARGV[2])
@@ -361,7 +409,14 @@ func RecordRoutingSuccess(c *gin.Context, channelID int, modelName string) {
 		return
 	}
 	channel, err := model.CacheGetChannel(channelID)
-	if err != nil || channel.Tag == nil || !routingPolicyUsesTag(policy, *channel.Tag) {
+	if err != nil {
+		return
+	}
+	// 鉴权连败清零与 tag/策略无关：一次成功即证明账号恢复
+	authKey, _ := routingAccountKey(channel, "")
+	authKey.Model = ""
+	routingAuthStrikes.Delete(authKey)
+	if channel.Tag == nil || !routingPolicyUsesTag(policy, *channel.Tag) {
 		return
 	}
 	key, err := routingAccountKey(channel, modelName)

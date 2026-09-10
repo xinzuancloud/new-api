@@ -85,14 +85,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 	}
 	if policy.Enabled && policyConfigured && relayFormat != types.RelayFormatOpenAIRealtime {
-		originalRequest := c.Request
-		ctx, cancel := context.WithTimeout(originalRequest.Context(), time.Duration(policy.RequestTimeoutSeconds)*time.Second)
-		defer func() {
-			cancel()
-			// Middleware still evaluates the actual client context after this handler.
-			c.Request = originalRequest
-		}()
-		c.Request = originalRequest.WithContext(ctx)
+		// 预算改为重试决策点的墙钟检查，不再用 ctx WithTimeout 硬顶：
+		// 旧实现会在活跃流传输中途静默截断且无法换渠道，并与全部重试共享预算。
+		service.StartRoutingBudget(c, policy.RequestTimeoutSeconds)
 	}
 	requestId := c.GetString(common.RequestIdKey)
 	//group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
@@ -258,6 +253,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		addUsedChannel(c, channel.Id)
+		// 选中即记账（而非等请求体就绪后）：容量窗口的"检查-记账"间隔越短，
+		// 并发突发读到同一快照全部准入的超发幅度越小。
+		service.RecordRoutingAttempt(c, channel.Id, relayInfo.OriginModelName, relayInfo.GetEstimatePromptTokens())
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
 			newAPIError = billingErr
 			break
@@ -274,7 +272,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
-		service.RecordRoutingAttempt(c, channel.Id, relayInfo.OriginModelName, relayInfo.GetEstimatePromptTokens())
 
 		if protocolPlan != nil {
 			newAPIError = relay.ExecuteProtocolRequest(c, relayInfo, protocolPlan)
@@ -308,6 +305,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		remainingRetries := retryLimit - retryParam.GetRetry()
 		if totalAttemptLimit > 0 {
 			remainingRetries = totalAttemptLimit - len(c.GetStringSlice("use_channel"))
+		}
+		if service.RoutingBudgetExceeded(c) {
+			logger.LogWarn(c, fmt.Sprintf("routing attempt budget exhausted, stop retrying (channel #%d, status code: %d)", channel.Id, newAPIError.StatusCode))
+			break
 		}
 		if !shouldRetry(c, newAPIError, remainingRetries) {
 			break
@@ -509,13 +510,15 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	if c.Request != nil && c.Request.Context().Err() != nil {
 		return
 	}
+	// 本次失败若由亲和钉住的渠道造成，清除亲和条目，避免同会话下个请求重钉故障渠道。
+	service.ClearChannelAffinityOnPinnedFailure(c, channelError.ChannelId)
 	if relayInfo != nil {
 		service.RecordRoutingFailure(c, channelError.ChannelId, relayInfo.OriginModelName, err.StatusCode, err.Error())
 	}
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
-	if service.ShouldDisableChannel(err) && channelError.AutoBan {
+	if service.ShouldDisableChannel(err) && channelError.AutoBan && service.AllowAutoBanChannel(c, channelError.ChannelId, err.StatusCode) {
 		gopool.Go(func() {
 			service.DisableChannel(channelError, err.ErrorWithStatusCode())
 		})
@@ -777,6 +780,8 @@ func executeTaskSubmissionWith(
 		diagnostics.attempt(retryParam.GetRetry()+1, channel, relayInfo.LockedChannel != nil)
 
 		addUsedChannel(c, channel.Id)
+		// 任务路径同样计入容量窗口（此前漏记，任务流量不占 tag_capacity）
+		service.RecordRoutingAttempt(c, channel.Id, relayInfo.OriginModelName, relayInfo.GetEstimatePromptTokens())
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
 			stage = "read_body"

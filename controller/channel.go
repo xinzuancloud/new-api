@@ -1170,6 +1170,10 @@ func UpdateChannelStatus(c *gin.Context) {
 	changed := model.UpdateChannelStatus(id, "", req.Status, "manual operation")
 	if changed {
 		model.InitChannelCache()
+		// 手动重新启用时清除该渠道的路由冷却/连败残留，立即恢复候选资格
+		if req.Status == common.ChannelStatusEnabled {
+			service.ClearRoutingCooldownsForChannel(id)
+		}
 	}
 	recordManageAudit(c, "channel.status_update", map[string]any{
 		"id":      id,
@@ -1193,6 +1197,9 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 	for _, id := range req.Ids {
 		if model.UpdateChannelStatus(id, "", req.Status, "manual batch operation") {
 			changedCount++
+			if req.Status == common.ChannelStatusEnabled {
+				service.ClearRoutingCooldownsForChannel(id)
+			}
 		}
 	}
 	if changedCount > 0 {

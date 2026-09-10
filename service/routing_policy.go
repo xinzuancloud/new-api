@@ -3,6 +3,7 @@ package service
 import (
 	"cmp"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,6 +26,89 @@ type routingCooldownKey struct {
 }
 
 var routingCooldowns sync.Map
+
+const (
+	// routingAuthCooldownSeconds 401/403（非配额类）的账号级冷却时长。
+	routingAuthCooldownSeconds = 300
+	// routingServerErrorCooldownSeconds 5xx/断流类的账号级冷却时长。
+	routingServerErrorCooldownSeconds = 30
+)
+
+// routingMappingWarned 对"ModelMapping 损坏被路由层排除"的告警按渠道节流（10 分钟一次）。
+var routingMappingWarned sync.Map
+
+// routingWarnMappingExcluded 渠道因 ModelMapping 解析失败被路由层永久排除时告警。
+// 之前该路径完全静默：渠道健康、配额充足却永远不被选中，无任何线索。
+func routingWarnMappingExcluded(c *gin.Context, channelID int, err error) {
+	now := time.Now()
+	if last, ok := routingMappingWarned.Load(channelID); ok && now.Sub(last.(time.Time)) < 10*time.Minute {
+		return
+	}
+	routingMappingWarned.Store(channelID, now)
+	logger.LogWarn(routingRequestContext(c), fmt.Sprintf("routing excludes channel=%d: invalid model mapping: %v", channelID, err))
+}
+
+// ClearRoutingCooldownsForChannel 删除该渠道（含 account_resource 别名）的全部
+// 本地路由冷却与连败计数。管理端手动重新启用/修复渠道后调用，避免残留冷却
+// 继续跳过该渠道最长一个冷却周期。Redis 副本靠 TTL 自然过期（多实例最长延迟一个周期）。
+func ClearRoutingCooldownsForChannel(channelID int) {
+	resources := map[string]struct{}{fmt.Sprintf("channel:%d", channelID): {}}
+	if channel, err := model.CacheGetChannel(channelID); err == nil {
+		if s := channel.GetSetting().ProtocolRouting; s != nil && s.Enabled && s.AccountResource != "" {
+			resources["account:"+s.AccountResource] = struct{}{}
+		}
+	}
+	clearByResource := func(m *sync.Map) {
+		m.Range(func(key, value any) bool {
+			if _, ok := resources[key.(routingCooldownKey).Resource]; ok {
+				m.Delete(key)
+			}
+			return true
+		})
+	}
+	clearByResource(&routingCooldowns)
+	clearByResource(&routingRateLimitStrikes)
+	clearByResource(&routingAuthStrikes)
+}
+
+// quotaResetAtPattern 匹配上游配额错误消息内嵌的绝对重置时间，
+// 如 "It will reset at 2026-09-10 13:59:10 +0800 CST"（Kimi 5 小时窗、火山周配额均已实测）。
+var quotaResetAtPattern = regexp.MustCompile(`reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) ([+-]\d{4})`)
+
+// parseQuotaResetAt 从配额错误消息解析绝对重置时间；消息无可解析时间戳时
+// 返回 ok=false，调用方回退固定冷却时长。
+func parseQuotaResetAt(message string) (time.Time, bool) {
+	m := quotaResetAtPattern.FindStringSubmatch(message)
+	if m == nil {
+		return time.Time{}, false
+	}
+	resetAt, err := time.Parse("2006-01-02 15:04:05 -0700", m[1]+" "+m[2])
+	if err != nil {
+		return time.Time{}, false
+	}
+	return resetAt, true
+}
+
+// StartRoutingBudget 记录本次请求的重试预算截止时间。预算只约束重试决策点
+// （RoutingBudgetExceeded），不作为 ctx deadline——后者会在活跃流传输中途
+// 取消请求（客户端收到无错误事件的静默截断）且与全部重试共享预算。
+// 单次尝试的响应头等待由 Transport.ResponseHeaderTimeout 兜底，
+// 流期间由 STREAMING_TIMEOUT 空闲看门狗兜底。
+func StartRoutingBudget(c *gin.Context, timeoutSeconds int) {
+	if timeoutSeconds <= 0 {
+		return
+	}
+	common.SetContextKey(c, constant.ContextKeyRoutingBudgetDeadline, time.Now().Add(time.Duration(timeoutSeconds)*time.Second))
+}
+
+// RoutingBudgetExceeded 报告重试预算是否耗尽；未设置预算（非策略分组）返回 false。
+func RoutingBudgetExceeded(c *gin.Context) bool {
+	deadline := common.GetContextKeyTime(c, constant.ContextKeyRoutingBudgetDeadline)
+	if deadline.IsZero() {
+		return false
+	}
+	return !time.Now().Before(deadline)
+}
 
 // RecordRoutingFailure quarantines this account/model, or the whole account
 // when configured. It never changes persistent channel status, probes providers,
@@ -52,9 +136,30 @@ func RecordRoutingFailure(c *gin.Context, channelID int, modelName string, statu
 			break
 		}
 	}
+	if quotaFailure {
+		if resetAt, ok := parseQuotaResetAt(message); ok {
+			// 消息自带精确重置时间：冷却到点（+60s 余量）精确恢复。
+			// 上限 6×基础冷却：5 小时窗精确到点；周配额由 auto-ban 接管，无需超长冷却。
+			precise := int(time.Until(resetAt).Seconds()) + 60
+			seconds = min(max(precise, 60), policy.QuotaCooldownSeconds*6)
+		}
+	}
 	if status == 429 && !quotaFailure {
 		key.Model = ""
 		seconds = routingNextRateLimitCooldown(c, key, policy)
+	}
+	if seconds <= 0 {
+		switch {
+		case status == 401 || status == 403:
+			// 鉴权类（非配额）：密钥失效/权限/风控通常账号级且短时不可自愈。
+			key.Model = ""
+			seconds = routingAuthCooldownSeconds
+		case status >= 500 && status <= 599:
+			// 服务端/断流类：账号级短冷却，避免坏账号在每个新请求上被反复首选
+			//（实证：无冷却时故障账号的错误分布极均匀）。
+			key.Model = ""
+			seconds = routingServerErrorCooldownSeconds
+		}
 	}
 	if seconds <= 0 {
 		return
@@ -155,6 +260,9 @@ func SelectPolicyChannel(param *RetryParam, group string) (*model.Channel, bool,
 				break
 			}
 			key, mappingErr := routingAccountKey(channel, param.ModelName)
+			if mappingErr != nil {
+				routingWarnMappingExcluded(param.Ctx, channel.Id, mappingErr)
+			}
 			if mappingErr != nil || usedResources[key.Resource] || routingAccountCooling(param.Ctx, channel, param.ModelName, now) {
 				tagFilters = append(tagFilters, dto.ChannelFilter{Kind: dto.FilterExcludedChannels, ExcludedChannelIDs: []int{channel.Id}})
 				continue
@@ -212,7 +320,11 @@ func RoutingAffinityAllowed(c *gin.Context, preferred *model.Channel, modelName,
 		return false
 	}
 	key, mappingErr := routingAccountKey(preferred, modelName)
-	if mappingErr != nil || routingAccountCooling(c, preferred, modelName, time.Now()) {
+	if mappingErr != nil {
+		routingWarnMappingExcluded(c, preferred.Id, mappingErr)
+		return false
+	}
+	if routingAccountCooling(c, preferred, modelName, time.Now()) {
 		return false
 	}
 	policy := operation_setting.GetRoutingPolicy()

@@ -720,3 +720,128 @@ func TestProtocolRoutingSettingsDatabasePersistence(t *testing.T) {
 	assert.Equal(t, settings.Proxy, actual.Proxy)
 	assert.Equal(t, settings.SystemPrompt, actual.SystemPrompt)
 }
+
+func TestParseQuotaResetAt(t *testing.T) {
+	cases := []struct {
+		name    string
+		message string
+		want    time.Time
+		wantOK  bool
+	}{
+		{
+			name:    "kimi 5-hour window",
+			message: "status_code=429, You have exceeded the 5-hour usage quota. It will reset at 2026-09-10 13:59:10 +0800 CST. We recommend upgrading your plan for more quota, or waiting for the reset.",
+			want:    time.Date(2026, 9, 10, 13, 59, 10, 0, time.FixedZone("", 8*3600)),
+			wantOK:  true,
+		},
+		{
+			name:    "volcengine weekly quota",
+			message: "status_code=429, You have exceeded the weekly usage quota. It will reset at 2026-09-07 00:00:00 +0800 CST.",
+			want:    time.Date(2026, 9, 7, 0, 0, 0, 0, time.FixedZone("", 8*3600)),
+			wantOK:  true,
+		},
+		{
+			name:    "relative reset wording without absolute time",
+			message: "You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.",
+			wantOK:  false,
+		},
+		{
+			name:    "no reset information",
+			message: "status_code=429, inference exceeds tpm/rpm limit",
+			wantOK:  false,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseQuotaResetAt(tt.message)
+			require.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				assert.True(t, tt.want.Equal(got), "want %s, got %s", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestRoutingFailureQuotaCooldownFollowsResetTime(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	old := operation_setting.RoutingPolicyJSON()
+	t.Cleanup(func() { require.NoError(t, operation_setting.UpdateRoutingPolicy(old)); routingCooldowns.Clear() })
+	require.NoError(t, operation_setting.UpdateRoutingPolicy(`{"enabled":true,"group_tag_order":{"team":["plan"]},"quota_cooldown_seconds":3600,"quota_error_keywords":["usage quota"],"request_timeout_seconds":300}`))
+	createChannelSelectAutoGroupsChannel(t, db, 3301, "team", "m")
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", 3301).Update("tag", "plan").Error)
+	model.InitChannelCache()
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+
+	msgWithResetAt := func(at time.Time) string {
+		return fmt.Sprintf("You have exceeded the 5-hour usage quota. It will reset at %s CST.", at.UTC().Format("2006-01-02 15:04:05 -0700"))
+	}
+
+	// 重置时间 2 小时后：冷却跟随消息时间（+60s 余量），而非固定 3600s
+	RecordRoutingFailure(ctx, 3301, "m2h", 429, msgWithResetAt(time.Now().Add(2*time.Hour)))
+	v, ok := routingCooldowns.Load(routingCooldownKey{"channel:3301", "m2h"})
+	require.True(t, ok)
+	assert.WithinDuration(t, time.Now().Add(2*time.Hour).Add(time.Minute), v.(time.Time), 2*time.Minute)
+
+	// 重置时间 30 天后：冷却封顶 6×基础冷却（6h）
+	RecordRoutingFailure(ctx, 3301, "m30d", 429, msgWithResetAt(time.Now().Add(30*24*time.Hour)))
+	v, ok = routingCooldowns.Load(routingCooldownKey{"channel:3301", "m30d"})
+	require.True(t, ok)
+	assert.WithinDuration(t, time.Now().Add(6*time.Hour), v.(time.Time), 2*time.Minute)
+
+	// 重置时间已过（时钟偏差）：短冷却 60s
+	RecordRoutingFailure(ctx, 3301, "mpast", 429, msgWithResetAt(time.Now().Add(-time.Hour)))
+	v, ok = routingCooldowns.Load(routingCooldownKey{"channel:3301", "mpast"})
+	require.True(t, ok)
+	assert.WithinDuration(t, time.Now().Add(time.Minute), v.(time.Time), 30*time.Second)
+}
+
+func TestRoutingFailureAuthAndServerErrorCooldowns(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	old := operation_setting.RoutingPolicyJSON()
+	t.Cleanup(func() { require.NoError(t, operation_setting.UpdateRoutingPolicy(old)); routingCooldowns.Clear() })
+	require.NoError(t, operation_setting.UpdateRoutingPolicy(`{"enabled":true,"group_tag_order":{"team":["plan"]},"quota_cooldown_seconds":3600,"quota_error_keywords":["weekly"],"rate_limit_cooldown_seconds":60,"request_timeout_seconds":300}`))
+	for _, id := range []int{3401, 3402} {
+		createChannelSelectAutoGroupsChannel(t, db, id, "team", "m")
+		require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", id).Update("tag", "plan").Error)
+	}
+	model.InitChannelCache()
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+
+	// 401：账号级冷却 300s；整渠道禁用被连败门控（3 次才放行）
+	RecordRoutingFailure(ctx, 3401, "m", 401, "invalid api key")
+	accountKey1 := routingCooldownKey{"channel:3401", ""}
+	v, ok := routingCooldowns.Load(accountKey1)
+	require.True(t, ok, "401 must produce an account-level cooldown")
+	assert.WithinDuration(t, time.Now().Add(300*time.Second), v.(time.Time), 30*time.Second)
+	assert.False(t, AllowAutoBanChannel(ctx, 3401, 401))
+	assert.False(t, AllowAutoBanChannel(ctx, 3401, 401))
+	assert.True(t, AllowAutoBanChannel(ctx, 3401, 401), "连败 3 次才允许整渠道禁用")
+	// 一次成功清零连败，重新计数
+	RecordRoutingSuccess(ctx, 3401, "m")
+	assert.False(t, AllowAutoBanChannel(ctx, 3401, 401), "成功后连败已清零")
+
+	// 502（独立渠道避免被已有更长冷却覆盖）：账号级冷却 30s
+	RecordRoutingFailure(ctx, 3402, "m", 502, "upstream Claude stream ended without message_stop")
+	accountKey2 := routingCooldownKey{"channel:3402", ""}
+	v, ok = routingCooldowns.Load(accountKey2)
+	require.True(t, ok, "5xx must produce an account-level cooldown")
+	assert.WithinDuration(t, time.Now().Add(30*time.Second), v.(time.Time), 15*time.Second)
+
+	// 手动重新启用：冷却与连败残留全部清除
+	ClearRoutingCooldownsForChannel(3401)
+	_, ok = routingCooldowns.Load(accountKey1)
+	assert.False(t, ok, "manual re-enable must clear residual cooldowns")
+	_, ok = routingAuthStrikes.Load(accountKey1)
+	assert.False(t, ok, "manual re-enable must clear auth strikes")
+}
+
+func TestRoutingBudget(t *testing.T) {
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	assert.False(t, RoutingBudgetExceeded(ctx), "未设置预算（非策略分组）永不超限")
+	StartRoutingBudget(ctx, 60)
+	assert.False(t, RoutingBudgetExceeded(ctx))
+	common.SetContextKey(ctx, constant.ContextKeyRoutingBudgetDeadline, time.Now().Add(-time.Second))
+	assert.True(t, RoutingBudgetExceeded(ctx), "过期预算必须报告超限")
+}
