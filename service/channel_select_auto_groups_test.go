@@ -801,7 +801,7 @@ func TestRoutingFailureAuthAndServerErrorCooldowns(t *testing.T) {
 	old := operation_setting.RoutingPolicyJSON()
 	t.Cleanup(func() { require.NoError(t, operation_setting.UpdateRoutingPolicy(old)); routingCooldowns.Clear() })
 	require.NoError(t, operation_setting.UpdateRoutingPolicy(`{"enabled":true,"group_tag_order":{"team":["plan"]},"quota_cooldown_seconds":3600,"quota_error_keywords":["weekly"],"rate_limit_cooldown_seconds":60,"request_timeout_seconds":300}`))
-	for _, id := range []int{3401, 3402} {
+	for _, id := range []int{3401, 3402, 3403} {
 		createChannelSelectAutoGroupsChannel(t, db, id, "team", "m")
 		require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", id).Update("tag", "plan").Error)
 	}
@@ -822,11 +822,20 @@ func TestRoutingFailureAuthAndServerErrorCooldowns(t *testing.T) {
 	RecordRoutingSuccess(ctx, 3401, "m")
 	assert.False(t, AllowAutoBanChannel(ctx, 3401, 401), "成功后连败已清零")
 
-	// 502（独立渠道避免被已有更长冷却覆盖）：账号级冷却 30s
+	// 502 甩负载类（空流/无终止事件）：模型级短冷却 5s，不升级账号级
 	RecordRoutingFailure(ctx, 3402, "m", 502, "upstream Claude stream ended without message_stop")
-	accountKey2 := routingCooldownKey{"channel:3402", ""}
-	v, ok = routingCooldowns.Load(accountKey2)
-	require.True(t, ok, "5xx must produce an account-level cooldown")
+	shedKey := routingCooldownKey{"channel:3402", "m"}
+	v, ok = routingCooldowns.Load(shedKey)
+	require.True(t, ok, "stream-shed 502 must produce a model-scoped short cooldown")
+	assert.WithinDuration(t, time.Now().Add(5*time.Second), v.(time.Time), 3*time.Second)
+	_, ok = routingCooldowns.Load(routingCooldownKey{"channel:3402", ""})
+	assert.False(t, ok, "stream-shed 502 must not park the whole account")
+
+	// 502 非甩负载（独立渠道避免被已有冷却覆盖）：账号级冷却 30s
+	RecordRoutingFailure(ctx, 3403, "m", 502, "dial tcp: connection refused")
+	accountKey3 := routingCooldownKey{"channel:3403", ""}
+	v, ok = routingCooldowns.Load(accountKey3)
+	require.True(t, ok, "generic 5xx must produce an account-level cooldown")
 	assert.WithinDuration(t, time.Now().Add(30*time.Second), v.(time.Time), 15*time.Second)
 
 	// 手动重新启用：冷却与连败残留全部清除

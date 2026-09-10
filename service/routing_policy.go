@@ -32,6 +32,11 @@ const (
 	routingAuthCooldownSeconds = 300
 	// routingServerErrorCooldownSeconds 5xx/断流类的账号级冷却时长。
 	routingServerErrorCooldownSeconds = 30
+	// routingStreamShedCooldownSeconds 上游甩负载（200 空流/无终止事件）的模型级
+	// 短冷却：账号没坏、只是瞬时过载，路由换账号几秒后即可回访。
+	// 若按账号级长冷却，免费层大面积甩负载时整池蹲坑、请求直接 503
+	//（2026-09-10 sensenova deepseek-v4-flash 实测）。
+	routingStreamShedCooldownSeconds = 5
 )
 
 // routingMappingWarned 对"ModelMapping 损坏被路由层排除"的告警按渠道节流（10 分钟一次）。
@@ -154,6 +159,10 @@ func RecordRoutingFailure(c *gin.Context, channelID int, modelName string, statu
 			// 鉴权类（非配额）：密钥失效/权限/风控通常账号级且短时不可自愈。
 			key.Model = ""
 			seconds = routingAuthCooldownSeconds
+		case status == 502 && (strings.Contains(lower, "ended without message_stop") ||
+			strings.Contains(lower, "ended without a terminal event")):
+			// 上游甩负载：模型级短冷却，保留账号服务其他模型的能力。
+			seconds = routingStreamShedCooldownSeconds
 		case status >= 500 && status <= 599:
 			// 服务端/断流类：账号级短冷却，避免坏账号在每个新请求上被反复首选
 			//（实证：无冷却时故障账号的错误分布极均匀）。
