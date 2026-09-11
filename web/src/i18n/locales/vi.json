@@ -2749,6 +2749,7 @@
     "Initializing…": "Đang khởi tạo…",
     "Inpaint": "Inpaint",
     "Input": "Đầu vào",
+    "Input excludes cached tokens (shown separately below)": "Đầu vào không bao gồm token đã cache (hiển thị riêng bên dưới)",
     "Input / Output tokens": "Token đầu vào / đầu ra",
     "Input mode": "Chế độ nhập",
     "Input price": "Giá đầu vào",

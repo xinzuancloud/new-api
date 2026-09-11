@@ -2749,6 +2749,7 @@
     "Initializing…": "Initialisation…",
     "Inpaint": "Inpainting",
     "Input": "Entrée",
+    "Input excludes cached tokens (shown separately below)": "L'entrée exclut les tokens en cache (listés séparément ci-dessous)",
     "Input / Output tokens": "Jetons d’entrée / sortie",
     "Input mode": "Mode d'entrée",
     "Input price": "Prix d’entrée",

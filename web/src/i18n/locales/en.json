@@ -2749,6 +2749,7 @@
     "Initializing…": "Initializing…",
     "Inpaint": "Inpaint",
     "Input": "Input",
+    "Input excludes cached tokens (shown separately below)": "Input excludes cached tokens (shown separately below)",
     "Input / Output tokens": "Input / Output tokens",
     "Input mode": "Input mode",
     "Input price": "Input price",

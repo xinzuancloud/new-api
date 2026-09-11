@@ -2749,6 +2749,7 @@
     "Initializing…": "正在初始化…",
     "Inpaint": "局部重繪",
     "Input": "輸入",
+    "Input excludes cached tokens (shown separately below)": "輸入為新增部分（不含快取，快取單獨列出）",
     "Input / Output tokens": "輸入 / 輸出權杖",
     "Input mode": "輸入模式",
     "Input price": "輸入價格",

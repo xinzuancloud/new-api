@@ -171,6 +171,11 @@ export interface LogOtherData {
   user_agent?: string
   request_path?: string
   request_conversion?: string[]
+  // Usage reporting semantics of the upstream: 'anthropic' means
+  // prompt_tokens excludes cached tokens (they are reported separately);
+  // absent means OpenAI semantics where prompt_tokens is the total input and
+  // cache_tokens is a subset of it.
+  usage_semantic?: 'anthropic' | (string & {})
   ws?: boolean
   audio?: boolean
   audio_input?: number

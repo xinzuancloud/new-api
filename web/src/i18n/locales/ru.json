@@ -2749,6 +2749,7 @@
     "Initializing…": "Инициализация…",
     "Inpaint": "Инпейнтинг",
     "Input": "Ввод",
+    "Input excludes cached tokens (shown separately below)": "Входные токены указаны без кэшированных (показаны отдельно ниже)",
     "Input / Output tokens": "Входные / выходные токены",
     "Input mode": "Режим ввода",
     "Input price": "Цена входа",

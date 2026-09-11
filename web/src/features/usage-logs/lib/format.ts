@@ -169,6 +169,44 @@ export function parseLogOther(other: string): LogOtherData | null {
   }
 }
 
+/**
+ * New (non-cached) input tokens for a log, normalized across the two upstream
+ * usage reporting semantics:
+ *
+ * - Anthropic (`usage_semantic === 'anthropic'`): prompt_tokens already
+ *   excludes cached tokens; cached tokens are reported side by side.
+ * - OpenAI (default): prompt_tokens is the total input and cache_tokens is a
+ *   subset of it, so the new portion is the difference.
+ *
+ * Keeps the raw log values untouched; display-only normalization so the
+ * "Input" figure means the same thing for both wire formats.
+ */
+export function getNewInputTokens(
+  promptTokens: number,
+  other: LogOtherData | null
+): number {
+  if (!other || other.usage_semantic === 'anthropic') return promptTokens
+  const cacheRead = other.cache_tokens || 0
+  return Math.max(promptTokens - cacheRead, 0)
+}
+
+/**
+ * True when getNewInputTokens had to subtract cached tokens from the reported
+ * prompt_tokens (OpenAI-inclusive semantics with a cache hit). Callers use it
+ * to flag the normalized figure instead of silently changing the meaning.
+ */
+export function isInputNormalized(
+  promptTokens: number,
+  other: LogOtherData | null
+): boolean {
+  return (
+    !!other &&
+    other.usage_semantic !== 'anthropic' &&
+    (other.cache_tokens || 0) > 0 &&
+    getNewInputTokens(promptTokens, other) !== promptTokens
+  )
+}
+
 export function getReasoningEffortVariant(
   effort: string | undefined
 ): StatusBadgeProps['variant'] {

@@ -2749,6 +2749,7 @@
     "Initializing…": "初期化中…",
     "Inpaint": "インペイント",
     "Input": "入力",
+    "Input excludes cached tokens (shown separately below)": "入力にはキャッシュ済みトークンは含まれません（キャッシュは別途表示）",
     "Input / Output tokens": "入力 / 出力トークン",
     "Input mode": "入力モード",
     "Input price": "入力価格",

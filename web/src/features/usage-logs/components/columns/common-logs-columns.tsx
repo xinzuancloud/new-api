@@ -56,7 +56,9 @@ import {
   formatModelName,
   decodeBillingExprB64,
   getTieredBillingSummary,
+  getNewInputTokens,
   hasAnyCacheTokens,
+  isInputNormalized,
   parseLogOther,
   isViolationFeeLog,
   renderAuditContent,
@@ -714,10 +716,26 @@ export function useCommonLogsColumns(
           ? cacheWrite5m + cacheWrite1h
           : other?.cache_creation_tokens || 0
 
+        // Unified display semantics: the input figure is always the new
+        // (non-cached) portion. Upstreams reporting prompt_tokens
+        // inclusively (OpenAI semantics) are normalized here; raw log values
+        // are untouched.
+        const newInputTokens = getNewInputTokens(promptTokens, other)
+        const normalized = isInputNormalized(promptTokens, other)
+
         return (
-          <div className='flex flex-col gap-0.5'>
+          <div
+            className='flex flex-col gap-0.5'
+            title={
+              normalized
+                ? t(
+                    'Input excludes cached tokens (shown separately below)'
+                  )
+                : undefined
+            }
+          >
             <span className='font-mono text-xs font-medium tabular-nums'>
-              {promptTokens.toLocaleString()} /{' '}
+              {newInputTokens.toLocaleString()} /{' '}
               {completionTokens.toLocaleString()}
             </span>
             {(cacheReadTokens > 0 || cacheWriteTokens > 0) && (

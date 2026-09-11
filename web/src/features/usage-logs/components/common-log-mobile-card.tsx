@@ -32,7 +32,7 @@ import dayjs from '@/lib/dayjs'
 import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 
 import type { UsageLog } from '../data/schema'
-import { formatModelName, parseLogOther } from '../lib/format'
+import { formatModelName, getNewInputTokens, isInputNormalized, parseLogOther } from '../lib/format'
 import {
   getLogTypeConfig,
   isDisplayableLogType,
@@ -288,10 +288,16 @@ export function CommonLogMobileCard<TData>(props: {
       )}
       {showTokens && (
         <div className='text-muted-foreground flex flex-wrap gap-x-3 gap-y-1 text-xs [overflow-wrap:anywhere]'>
-          <span>
+          <span
+            title={
+              isInputNormalized(log.prompt_tokens, other)
+                ? t('Input excludes cached tokens (shown separately below)')
+                : undefined
+            }
+          >
             {t('Input')}{' '}
             <span className='text-foreground tabular-nums'>
-              {log.prompt_tokens.toLocaleString()}
+              {getNewInputTokens(log.prompt_tokens, other).toLocaleString()}
             </span>
           </span>
           <span>
